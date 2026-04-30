@@ -1,0 +1,45 @@
+from __future__ import annotations
+
+import ctypes
+from ctypes import wintypes
+import tkinter as tk
+
+
+class RECT(ctypes.Structure):
+    _fields_ = [
+        ("left", wintypes.LONG),
+        ("top", wintypes.LONG),
+        ("right", wintypes.LONG),
+        ("bottom", wintypes.LONG),
+    ]
+
+
+def _get_work_area() -> tuple[int, int, int, int] | None:
+    try:
+        rect = RECT()
+        SPI_GETWORKAREA = 48
+        if ctypes.windll.user32.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(rect), 0):
+            return rect.left, rect.top, rect.right, rect.bottom
+    except Exception:
+        return None
+    return None
+
+
+def center_window(window: tk.Misc, desired_width: int, desired_height: int, min_margin: int = 18) -> tuple[int, int]:
+    window.update_idletasks()
+    area = _get_work_area()
+    if area is None:
+        screen_w = window.winfo_screenwidth()
+        screen_h = window.winfo_screenheight()
+        left, top, right, bottom = 0, 0, screen_w, screen_h
+    else:
+        left, top, right, bottom = area
+
+    avail_w = max(360, right - left - min_margin * 2)
+    avail_h = max(260, bottom - top - min_margin * 2)
+    width = min(desired_width, avail_w)
+    height = min(desired_height, avail_h)
+    x = left + max(min_margin, (right - left - width) // 2)
+    y = top + max(min_margin, (bottom - top - height) // 2)
+    window.geometry(f"{width}x{height}+{x}+{y}")
+    return width, height
