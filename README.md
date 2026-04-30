@@ -26,6 +26,7 @@
 
 双击：
 
+- `start.bat`
 - `start_app.bat`
 - `start_app.vbs`
 
@@ -33,6 +34,12 @@
 
 ```powershell
 python app.py
+```
+
+如需首次安装依赖，请单独运行：
+
+```powershell
+setup_deps.bat
 ```
 
 ## 使用说明

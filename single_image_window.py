@@ -13,7 +13,7 @@ def open_single_image_window(master: tk.Misc, image_path: str | Path | None = No
     window.title("单张图片分析模式")
     configure_window_icon(window)
     app = PhotoAnalyzerApp(window, single_mode=True)
-    center_window(window, 1780, 1080)
+    center_window(window, 1880, 1120)
     if image_path is not None:
         app.load_single_image(Path(image_path))
     return app

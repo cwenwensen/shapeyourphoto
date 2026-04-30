@@ -13,7 +13,7 @@ def main() -> None:
     root.title(f"{APP_NAME} v{APP_VERSION}")
     configure_window_icon(root)
     PhotoAnalyzerApp(root)
-    center_window(root, 1560, 900)
+    center_window(root, 1700, 1020)
     root.mainloop()
 
 

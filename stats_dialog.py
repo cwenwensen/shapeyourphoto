@@ -22,8 +22,9 @@ def show_stats_dialog(parent: tk.Widget, stats: SessionStats) -> None:
     dialog = tk.Toplevel(parent)
     dialog.title("累计统计")
     dialog.minsize(760, 560)
+    dialog.resizable(True, True)
     dialog.transient(parent.winfo_toplevel())
-    center_window(dialog, 860, 620)
+    center_window(dialog, 920, 700)
 
     outer = ttk.Frame(dialog, padding=14)
     outer.pack(fill="both", expand=True)

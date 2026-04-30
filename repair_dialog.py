@@ -19,7 +19,7 @@ class RepairDialog(tk.Toplevel):
     ) -> None:
         super().__init__(parent)
         self.title(title)
-        self.resizable(False, False)
+        self.resizable(True, True)
         self.result: RepairSelection | None = None
 
         self.mode_var = tk.StringVar(value="adaptive" if allow_adaptive else "manual")
@@ -33,61 +33,88 @@ class RepairDialog(tk.Toplevel):
         self.transient(parent.winfo_toplevel())
         self.grab_set()
         self.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.minsize(720, 560)
 
         container = ttk.Frame(self, padding=14)
         container.pack(fill="both", expand=True)
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(0, weight=1)
 
-        ttk.Label(container, text="修复策略", font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w")
+        form_shell = ttk.Frame(container)
+        form_shell.grid(row=0, column=0, sticky="nsew")
+        form_shell.columnconfigure(0, weight=1)
+        form_shell.rowconfigure(0, weight=1)
+
+        canvas = tk.Canvas(form_shell, bg="#fbfcfa", highlightthickness=0)
+        scroll = ttk.Scrollbar(form_shell, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scroll.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scroll.grid(row=0, column=1, sticky="ns")
+
+        content = ttk.Frame(canvas, padding=(2, 2, 10, 2))
+        window_id = canvas.create_window((0, 0), window=content, anchor="nw")
+
+        def _sync_scroll(_event=None) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _fit_content(_event=None) -> None:
+            canvas.itemconfigure(window_id, width=max(320, canvas.winfo_width()))
+
+        content.bind("<Configure>", _sync_scroll)
+        canvas.bind("<Configure>", _fit_content)
+
+        ttk.Label(content, text="修复策略", font=("Microsoft YaHei UI", 11, "bold")).pack(anchor="w")
         ttk.Label(
-            container,
+            content,
             text="自动模式会按每张图片的检测结果套用推荐方法；手动模式会统一使用你勾选的方法。",
-            wraplength=520,
+            wraplength=640,
         ).pack(anchor="w", pady=(4, 10))
 
         if allow_adaptive:
-            ttk.Radiobutton(container, text="按检测结果自动推荐", value="adaptive", variable=self.mode_var).pack(anchor="w")
-        ttk.Radiobutton(container, text="统一使用勾选的方法", value="manual", variable=self.mode_var).pack(anchor="w", pady=(0, 10))
+            ttk.Radiobutton(content, text="按检测结果自动推荐", value="adaptive", variable=self.mode_var).pack(anchor="w")
+        ttk.Radiobutton(content, text="统一使用勾选的方法", value="manual", variable=self.mode_var).pack(anchor="w", pady=(0, 10))
 
         recommended_labels = "、".join(get_method_labels(recommended_method_ids)) or "当前没有明确推荐项"
-        ttk.Label(container, text=f"当前推荐：{recommended_labels}", wraplength=520).pack(anchor="w", pady=(0, 10))
+        ttk.Label(content, text=f"当前推荐：{recommended_labels}", wraplength=640).pack(anchor="w", pady=(0, 10))
 
-        folder_row = ttk.Frame(container)
+        folder_row = ttk.Frame(content)
         folder_row.pack(fill="x", pady=(0, 8))
         ttk.Label(folder_row, text="输出目录名：").pack(side="left")
-        ttk.Entry(folder_row, textvariable=self.output_folder_var, width=20).pack(side="left")
+        ttk.Entry(folder_row, textvariable=self.output_folder_var, width=22).pack(side="left")
         ttk.Label(folder_row, text="例如：_repaired").pack(side="left", padx=(8, 0))
 
-        suffix_row = ttk.Frame(container)
+        suffix_row = ttk.Frame(content)
         suffix_row.pack(fill="x", pady=(0, 10))
         ttk.Label(suffix_row, text="输出文件后缀：").pack(side="left")
-        ttk.Entry(suffix_row, textvariable=self.filename_suffix_var, width=20).pack(side="left")
+        ttk.Entry(suffix_row, textvariable=self.filename_suffix_var, width=22).pack(side="left")
         ttk.Label(suffix_row, text="例如：_fixed").pack(side="left", padx=(8, 0))
 
-        options_row = ttk.Frame(container)
+        options_row = ttk.Frame(content)
         options_row.pack(fill="x", pady=(0, 10))
         ttk.Checkbutton(options_row, text="使用后缀", variable=self.use_suffix_var).pack(side="left")
         ttk.Checkbutton(options_row, text="覆盖原文件（默认关闭）", variable=self.overwrite_var).pack(side="left", padx=(12, 0))
 
-        ttk.Label(container, text="手动修复方法", font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w", pady=(0, 8))
+        ttk.Label(content, text="手动修复方法", font=("Microsoft YaHei UI", 11, "bold")).pack(anchor="w", pady=(0, 8))
 
-        methods_frame = ttk.Frame(container)
+        methods_frame = ttk.Frame(content)
         methods_frame.pack(fill="x")
         for method in methods:
             row = ttk.Frame(methods_frame)
             row.pack(fill="x", pady=2)
             ttk.Checkbutton(row, text=method.label, variable=self.method_vars[method.method_id]).pack(side="left")
-            ttk.Label(row, text=method.description).pack(side="left", padx=(8, 0))
+            ttk.Label(row, text=method.description, wraplength=480).pack(side="left", padx=(8, 0))
 
-        helper_row = ttk.Frame(container)
+        helper_row = ttk.Frame(content)
         helper_row.pack(fill="x", pady=(10, 0))
         ttk.Button(helper_row, text="只选推荐项", command=self._set_recommended).pack(side="left")
         ttk.Button(helper_row, text="清空手动勾选", command=self._clear_methods).pack(side="left", padx=6)
 
         action_row = ttk.Frame(container)
-        action_row.pack(fill="x", pady=(14, 0))
+        action_row.grid(row=1, column=0, sticky="ew", pady=(12, 0))
         ttk.Button(action_row, text="取消", command=self._cancel).pack(side="right")
         ttk.Button(action_row, text="开始修复", command=self._confirm).pack(side="right", padx=(0, 8))
-        center_window(self, 700, 620)
+
+        center_window(self, 780, 760)
 
     def _set_recommended(self) -> None:
         for method_id, variable in self.method_vars.items():

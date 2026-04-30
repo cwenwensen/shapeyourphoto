@@ -11,8 +11,9 @@ def show_history_dialog(parent: tk.Widget) -> None:
     dialog = tk.Toplevel(parent)
     dialog.title("更新历史")
     dialog.minsize(680, 520)
+    dialog.resizable(True, True)
     dialog.transient(parent.winfo_toplevel())
-    center_window(dialog, 760, 620)
+    center_window(dialog, 820, 680)
 
     outer = ttk.Frame(dialog, padding=14)
     outer.pack(fill="both", expand=True)

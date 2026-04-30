@@ -3,18 +3,15 @@ setlocal
 cd /d "%~dp0"
 
 set "PYTHON_CMD="
-set "PYTHONW_CMD="
 where py >nul 2>nul
 if not errorlevel 1 (
     set "PYTHON_CMD=py -3"
-    set "PYTHONW_CMD=pyw -3"
 )
 
 if not defined PYTHON_CMD (
     where python >nul 2>nul
     if not errorlevel 1 (
         set "PYTHON_CMD=python"
-        set "PYTHONW_CMD=pythonw"
     )
 )
 
@@ -25,15 +22,15 @@ if not defined PYTHON_CMD (
     exit /b 1
 )
 
-if exist app.pyw (
-    start "" %PYTHONW_CMD% app.pyw
-    exit /b 0
-)
-
-call %PYTHON_CMD% app.py
+echo [INFO] Installing project dependencies...
+call %PYTHON_CMD% -m pip install -r requirements.txt
 if errorlevel 1 (
     echo.
-    echo [ERROR] Application crashed. See error message above.
+    echo [ERROR] Dependency installation failed.
     pause
     exit /b 1
 )
+
+echo.
+echo [INFO] Dependencies are ready.
+pause

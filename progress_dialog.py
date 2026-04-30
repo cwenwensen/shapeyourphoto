@@ -10,7 +10,7 @@ from window_layout import center_window
 @dataclass
 class TaskProgressState:
     total: int = 1
-    done: int = 0
+    done: float = 0.0
     title: str = "待处理"
     detail: str = "尚未开始。"
     status: str = "尚未开始。"
@@ -68,7 +68,11 @@ class TaskProgressDialog:
         self.window.title(state.dialog_title)
         self.progressbar.configure(maximum=maximum)
         self.progress_var.set(float(state.done))
-        self.count_var.set(f"{state.done} / {state.total}")
+        if float(state.done).is_integer():
+            done_text = str(int(state.done))
+        else:
+            done_text = f"{state.done:.1f}"
+        self.count_var.set(f"{done_text} / {state.total}")
         self.title_var.set(state.dialog_header)
         self.detail_var.set(state.detail)
         self.accent_line.configure(bg=state.accent)
@@ -130,7 +134,7 @@ class TaskProgressController:
     def update(
         self,
         *,
-        done: int,
+        done: float,
         total: int | None = None,
         title: str | None = None,
         detail: str | None = None,
@@ -140,7 +144,7 @@ class TaskProgressController:
     ) -> None:
         if total is not None:
             self.state.total = max(1, total)
-        self.state.done = max(0, min(done, self.state.total))
+        self.state.done = max(0.0, min(float(done), float(self.state.total)))
         if title is not None:
             self.state.title = title
         if detail is not None:

@@ -116,9 +116,11 @@ def repair_image_file(
         save_kwargs["icc_profile"] = icc_profile
     if xmp_data is not None:
         save_kwargs["xmp"] = xmp_data
-    if source_path.suffix.lower() in {".jpg", ".jpeg"}:
+    if source_path.suffix.lower() in {".jpg", ".jpeg", ".jfif"}:
         save_kwargs.update({"quality": 95, "optimize": True, "exif": _build_jpeg_exif(exif_bytes, source_path.name)})
     elif source_path.suffix.lower() == ".png":
         save_kwargs["pnginfo"] = _build_png_info(source_path.name)
+    elif source_path.suffix.lower() == ".webp":
+        save_kwargs.update({"quality": 95, "exif": _build_jpeg_exif(exif_bytes, source_path.name)})
     fixed.save(output_path, **save_kwargs)
     return RepairRecord(source_path=source_path, output_path=output_path, method_ids=method_ids)

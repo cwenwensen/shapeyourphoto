@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import queue
 import threading
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageTk
+from PIL import Image, ImageOps
 
 from analyzer import analyze_image
 from app_console import AppConsole
@@ -41,17 +42,19 @@ FILTER_OPTIONS = [
     "饱和度偏高",
 ]
 
+ANALYSIS_PROGRESS_STEPS = 5
+
 
 class PhotoAnalyzerApp:
     def __init__(self, root: tk.Misc, single_mode: bool = False) -> None:
         self.root = root
         self.single_mode = single_mode
         if self.single_mode:
-            self.root.geometry("1780x1080")
-            self.root.minsize(1440, 900)
+            self.root.geometry("1880x1120")
+            self.root.minsize(1500, 940)
         else:
-            self.root.geometry("1560x900")
-            self.root.minsize(1280, 820)
+            self.root.geometry("1700x1020")
+            self.root.minsize(1380, 880)
 
         self.folder_var = tk.StringVar()
         self.status_var = tk.StringVar(value="请选择图片目录开始分析。" if not self.single_mode else "请选择单张图片开始分析。")
@@ -70,7 +73,6 @@ class PhotoAnalyzerApp:
         self.errors: dict[Path, str] = {}
         self.selected_flags: dict[Path, tk.BooleanVar] = {}
         self.item_lookup: dict[str, Path] = {}
-        self.preview_image = None
         self.worker_lock = threading.Lock()
         self.is_busy = False
         self.control_widgets: list[ttk.Widget] = []
@@ -81,6 +83,9 @@ class PhotoAnalyzerApp:
         self.drop_target: WindowsFileDropTarget | None = None
         self.sort_column = "name"
         self.sort_reverse = False
+        self.analysis_phase_progress: dict[Path, int] = {}
+        self._last_scan_update = 0.0
+        self._ui_queue: queue.SimpleQueue = queue.SimpleQueue()
 
         self._configure_style()
         self._build_ui()
@@ -92,6 +97,7 @@ class PhotoAnalyzerApp:
             self.progress_detail_var,
             self.status_var,
         )
+        self.root.after(25, self._drain_ui_queue)
         self._install_drag_drop()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after_idle(self._apply_initial_layout)
@@ -107,21 +113,21 @@ class PhotoAnalyzerApp:
         style.configure("TFrame", background="#eef3ef")
         style.configure("Panel.TFrame", background="#fbfcfa")
         style.configure("TopCard.TFrame", background="#f5faf6")
-        style.configure("TLabel", background="#eef3ef", foreground="#1f3527", font=("Microsoft YaHei UI", 10))
+        style.configure("TLabel", background="#eef3ef", foreground="#1f3527", font=("Microsoft YaHei UI", 11))
         style.configure("Header.TLabel", background="#eef3ef", foreground="#17361f", font=("Microsoft YaHei UI", 20, "bold"))
-        style.configure("Sub.TLabel", background="#eef3ef", foreground="#45604d", font=("Microsoft YaHei UI", 10))
-        style.configure("PanelTitle.TLabel", background="#fbfcfa", foreground="#1f3527", font=("Microsoft YaHei UI", 10, "bold"))
+        style.configure("Sub.TLabel", background="#eef3ef", foreground="#45604d", font=("Microsoft YaHei UI", 11))
+        style.configure("PanelTitle.TLabel", background="#fbfcfa", foreground="#1f3527", font=("Microsoft YaHei UI", 11, "bold"))
         style.configure("HudTitle.TLabel", background="#f5faf6", foreground="#163624", font=("Microsoft YaHei UI", 11, "bold"))
-        style.configure("HudValue.TLabel", background="#f5faf6", foreground="#2d5640", font=("Microsoft YaHei UI", 10))
-        style.configure("Treeview", font=("Microsoft YaHei UI", 10), rowheight=84)
+        style.configure("HudValue.TLabel", background="#f5faf6", foreground="#2d5640", font=("Microsoft YaHei UI", 9))
+        style.configure("Treeview", font=("Microsoft YaHei UI", 10), rowheight=90)
         style.configure("Treeview.Heading", font=("Microsoft YaHei UI", 10, "bold"))
-        style.configure("Accent.TButton", font=("Microsoft YaHei UI", 10, "bold"))
-        style.configure("Soft.TButton", font=("Microsoft YaHei UI", 10))
+        style.configure("Accent.TButton", font=("Microsoft YaHei UI", 11, "bold"), padding=(10, 7))
+        style.configure("Soft.TButton", font=("Microsoft YaHei UI", 11), padding=(10, 7))
         style.configure("TLabelframe", background="#fbfcfa", bordercolor="#d7e3da")
-        style.configure("TLabelframe.Label", background="#fbfcfa", foreground="#244333", font=("Microsoft YaHei UI", 10, "bold"))
+        style.configure("TLabelframe.Label", background="#fbfcfa", foreground="#244333", font=("Microsoft YaHei UI", 11, "bold"))
 
     def _build_ui(self) -> None:
-        outer = ttk.Frame(self.root, padding=16)
+        outer = ttk.Frame(self.root, padding=18)
         outer.pack(fill="both", expand=True)
 
         top_shell = ttk.Frame(outer, style="TopCard.TFrame", padding=14)
@@ -137,12 +143,12 @@ class PhotoAnalyzerApp:
             subtitle = "单图大窗口模式，提供独立 HUD、预览、指标条图和详细说明。"
         ttk.Label(header, text=subtitle, style="Sub.TLabel").pack(anchor="w", pady=(4, 12))
 
-        controls = ttk.Frame(top_shell, style="Panel.TFrame", padding=12)
+        controls = ttk.Frame(top_shell, style="Panel.TFrame", padding=14)
         controls.pack(fill="x")
         controls.columnconfigure(0, weight=1)
 
-        path_entry = ttk.Entry(controls, textvariable=self.folder_var, font=("Consolas", 10))
-        path_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        path_entry = ttk.Entry(controls, textvariable=self.folder_var, font=("Consolas", 11))
+        path_entry.grid(row=0, column=0, rowspan=2, sticky="ew", padx=(0, 12), pady=(0, 4))
 
         choose_folder_button = ttk.Button(controls, text="选择目录", command=self.choose_folder)
         choose_image_button = ttk.Button(controls, text="选择图片", command=self.choose_image)
@@ -163,37 +169,11 @@ class PhotoAnalyzerApp:
         export_button = ttk.Button(controls, text="导出清理清单", command=self.export_selected)
         cleanup_button = ttk.Button(controls, text="清理勾选项", command=self.cleanup_selected)
 
-        column = 1
+        button_specs: list[ttk.Button] = []
         if not self.single_mode:
-            choose_folder_button.grid(row=0, column=column, padx=4)
-            column += 1
-        choose_image_button.grid(row=0, column=column, padx=4)
-        column += 1
-        scan_button.grid(row=0, column=column, padx=4)
-        column += 1
-        analyze_all_button.grid(row=0, column=column, padx=4)
-        column += 1
-        analyze_selected_button.grid(row=0, column=column, padx=4)
-        column += 1
-        single_mode_button.grid(row=0, column=column, padx=4)
-        column += 1
-        repair_current_button.grid(row=0, column=column, padx=4)
-        column += 1
-        denoise_current_button.grid(row=0, column=column, padx=4)
-        column += 1
-        repair_checked_button.grid(row=0, column=column, padx=4)
-        column += 1
-        stats_button.grid(row=0, column=column, padx=4)
-        column += 1
-        history_button.grid(row=0, column=column, padx=4)
-        column += 1
-        export_button.grid(row=0, column=column, padx=4)
-        column += 1
-        cleanup_button.grid(row=0, column=column, padx=(12, 0))
-
-        self.control_widgets.extend(
+            button_specs.append(choose_folder_button)
+        button_specs.extend(
             [
-                choose_folder_button,
                 choose_image_button,
                 scan_button,
                 analyze_all_button,
@@ -208,6 +188,15 @@ class PhotoAnalyzerApp:
                 cleanup_button,
             ]
         )
+        button_columns = 6
+        for offset in range(button_columns):
+            controls.columnconfigure(offset + 1, weight=1)
+        for index, button in enumerate(button_specs):
+            row = index // button_columns
+            column = 1 + (index % button_columns)
+            button.grid(row=row, column=column, sticky="ew", padx=4, pady=4)
+
+        self.control_widgets.extend(button_specs)
 
         toolbar = ttk.Frame(top_shell, padding=(0, 10), style="TopCard.TFrame")
         toolbar.pack(fill="x")
@@ -220,7 +209,7 @@ class PhotoAnalyzerApp:
         ttk.Label(toolbar, text="提示：支持目录/图片拖入，分栏边界可拖动调整。", style="Sub.TLabel").pack(side="right")
         self.control_widgets.extend([filter_box, auto_check])
 
-        progress_panel = ttk.LabelFrame(top_shell, text="任务进度", padding=12)
+        progress_panel = ttk.LabelFrame(top_shell, text="任务进度", padding=14)
         progress_panel.pack(fill="x", pady=(0, 2))
         self.progress_bar = ttk.Progressbar(progress_panel, mode="determinate", maximum=1, variable=self.progress_value)
         self.progress_bar.pack(fill="x", pady=(2, 6))
@@ -231,8 +220,8 @@ class PhotoAnalyzerApp:
         main.pack(fill="both", expand=True)
         self.main_pane = main
 
-        left = ttk.Frame(main, style="Panel.TFrame", padding=10)
-        right = ttk.Frame(main, style="Panel.TFrame", padding=10)
+        left = ttk.Frame(main, style="Panel.TFrame", padding=12)
+        right = ttk.Frame(main, style="Panel.TFrame", padding=12)
         main.add(left, weight=2)
         main.add(right, weight=3)
 
@@ -289,37 +278,29 @@ class PhotoAnalyzerApp:
         self.right_stack_pane = ttk.PanedWindow(right, orient="vertical")
         self.right_stack_pane.pack(fill="both", expand=True)
 
-        self.top_right_pane = ttk.PanedWindow(self.right_stack_pane, orient="horizontal")
         self.bottom_right_pane = ttk.PanedWindow(self.right_stack_pane, orient="horizontal")
-        self.right_stack_pane.add(self.top_right_pane, weight=2)
+        chart_frame = ttk.Frame(self.right_stack_pane, style="Panel.TFrame", padding=10)
+        summary_frame = ttk.Frame(self.bottom_right_pane, style="Panel.TFrame", padding=10)
+        info_frame = ttk.Frame(self.bottom_right_pane, style="Panel.TFrame", padding=10)
+        self.right_stack_pane.add(chart_frame, weight=4)
         self.right_stack_pane.add(self.bottom_right_pane, weight=2)
-
-        preview_frame = ttk.Frame(self.top_right_pane, style="Panel.TFrame", padding=8)
-        chart_frame = ttk.Frame(self.top_right_pane, style="Panel.TFrame", padding=8)
-        summary_frame = ttk.Frame(self.bottom_right_pane, style="Panel.TFrame", padding=8)
-        info_frame = ttk.Frame(self.bottom_right_pane, style="Panel.TFrame", padding=8)
-        self.top_right_pane.add(preview_frame, weight=3)
-        self.top_right_pane.add(chart_frame, weight=2)
         self.bottom_right_pane.add(summary_frame, weight=3)
         self.bottom_right_pane.add(info_frame, weight=2)
 
-        if self.single_mode:
-            hud_frame = ttk.Frame(preview_frame, style="TopCard.TFrame", padding=(10, 8))
-            hud_frame.pack(fill="x", pady=(0, 8))
-            hud_frame.columnconfigure(0, weight=3)
-            hud_frame.columnconfigure(1, weight=1)
-            ttk.Label(hud_frame, textvariable=self.hud_name_var, style="HudTitle.TLabel").grid(row=0, column=0, sticky="w")
-            ttk.Label(hud_frame, textvariable=self.hud_risk_var, style="HudTitle.TLabel").grid(row=0, column=1, sticky="e")
-            ttk.Label(hud_frame, textvariable=self.hud_tags_var, style="HudValue.TLabel").grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
-            ttk.Label(hud_frame, textvariable=self.hud_methods_var, style="HudValue.TLabel").grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
-
-        self.preview_label = tk.Label(preview_frame, bg="#dce9de", bd=0)
-        self.preview_label.pack(fill="both", expand=True)
-
         chart_frame.columnconfigure(0, weight=1)
-        chart_frame.rowconfigure(0, weight=1)
+        chart_frame.rowconfigure(1, weight=1)
+
+        hud_frame = ttk.Frame(chart_frame, style="TopCard.TFrame", padding=(10, 8))
+        hud_frame.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        hud_frame.columnconfigure(0, weight=3)
+        hud_frame.columnconfigure(1, weight=1)
+        ttk.Label(hud_frame, textvariable=self.hud_name_var, style="HudTitle.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(hud_frame, textvariable=self.hud_risk_var, style="HudTitle.TLabel").grid(row=0, column=1, sticky="e")
+        ttk.Label(hud_frame, textvariable=self.hud_tags_var, style="HudValue.TLabel").grid(row=1, column=0, columnspan=2, sticky="w", pady=(3, 0))
+        ttk.Label(hud_frame, textvariable=self.hud_methods_var, style="HudValue.TLabel").grid(row=2, column=0, columnspan=2, sticky="w", pady=(2, 0))
+
         self.chart = DiagnosticsChart(chart_frame)
-        self.chart.grid(row=0, column=0, sticky="nsew")
+        self.chart.grid(row=1, column=0, sticky="nsew")
 
         summary_frame.columnconfigure(0, weight=1)
         summary_frame.rowconfigure(0, weight=1)
@@ -374,10 +355,9 @@ class PhotoAnalyzerApp:
 
     def _apply_initial_layout(self) -> None:
         try:
-            self.main_pane.sashpos(0, 560)
-            self.top_right_pane.sashpos(0, 560)
-            self.bottom_right_pane.sashpos(0, 560)
-            self.right_stack_pane.sashpos(0, 320)
+            self.main_pane.sashpos(0, 620)
+            self.bottom_right_pane.sashpos(0, 610)
+            self.right_stack_pane.sashpos(0, 560)
         except Exception:
             pass
 
@@ -389,26 +369,26 @@ class PhotoAnalyzerApp:
         except Exception as exc:
             self._log_console(f"drag and drop init failed: {exc}")
 
+    def _dispatch_ui(self, callback) -> None:
+        self._ui_queue.put(callback)
+
+    def _drain_ui_queue(self) -> None:
+        try:
+            while True:
+                callback = self._ui_queue.get_nowait()
+                callback()
+        except queue.Empty:
+            pass
+        finally:
+            if self.root.winfo_exists():
+                self.root.after(25, self._drain_ui_queue)
+
     def _on_close(self) -> None:
         try:
             if self.drop_target is not None:
                 self.drop_target.uninstall()
         finally:
             self.root.destroy()
-
-    def _load_overlay_font(self) -> ImageFont.ImageFont:
-        candidates = [
-            Path(r"C:\Windows\Fonts\msyh.ttc"),
-            Path(r"C:\Windows\Fonts\msyhbd.ttc"),
-            Path(r"C:\Windows\Fonts\simhei.ttf"),
-        ]
-        for font_path in candidates:
-            if font_path.exists():
-                try:
-                    return ImageFont.truetype(str(font_path), 16)
-                except OSError:
-                    continue
-        return ImageFont.load_default()
 
     def _log_console(self, message: str) -> None:
         self.console.log(message)
@@ -430,7 +410,7 @@ class PhotoAnalyzerApp:
         chosen = filedialog.askopenfilename(
             title="选择单张图片",
             filetypes=[
-                ("图片文件", "*.jpg *.jpeg *.png *.bmp *.tif *.tiff *.webp"),
+                ("图片文件", "*.jpg *.jpeg *.png *.bmp *.tif *.tiff *.webp *.jfif"),
                 ("所有文件", "*.*"),
             ],
         )
@@ -501,6 +481,7 @@ class PhotoAnalyzerApp:
             messagebox.showerror("错误", "目录不存在，请重新选择。")
             return
 
+        self._last_scan_update = 0.0
         self._begin_task(
             1,
             "读取目录 0/0",
@@ -518,15 +499,15 @@ class PhotoAnalyzerApp:
                     current_label = str(current.relative_to(root))
                 except ValueError:
                     current_label = current.name
-            self.root.after(0, lambda: self._update_scan_progress(done, total, found, current_label))
+            self._dispatch_ui(lambda: self._update_scan_progress(done, total, found, current_label))
 
         def worker() -> None:
             try:
                 paths = scan_image_paths_with_progress(root, progress_callback)
             except Exception as exc:
-                self.root.after(0, lambda: self._scan_failed(str(exc)))
+                self._dispatch_ui(lambda: self._scan_failed(str(exc)))
                 return
-            self.root.after(0, lambda: self._scan_finished(paths))
+            self._dispatch_ui(lambda: self._scan_finished(paths))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -649,6 +630,11 @@ class PhotoAnalyzerApp:
         return str(candidate)
 
     def _update_scan_progress(self, done: int, total: int, found: int, current_label: str) -> None:
+        import time
+        now = time.time()
+        if now - self._last_scan_update < 0.1 and done < total:
+            return
+        self._last_scan_update = now
         self.progress_controller.update(
             done=done,
             total=max(1, total),
@@ -683,10 +669,11 @@ class PhotoAnalyzerApp:
         total = len(targets)
         if total == 0:
             return
+        self.analysis_phase_progress = {path: 0 for path in targets}
 
         self._log_console(f"analysis started: count={total}")
         self._begin_task(
-            total,
+            total * ANALYSIS_PROGRESS_STEPS,
             f"分析中 0/{total}",
             f"正在分析 {total} 张图片，请稍候...",
             show_dialog=True,
@@ -706,11 +693,10 @@ class PhotoAnalyzerApp:
                         pool.submit(
                             analyze_image,
                             path,
-                            lambda step, steps, phase, p=path: self.root.after(
-                                0,
+                            lambda step, steps, phase, p=path: self._dispatch_ui(
                                 lambda p=p, step=step, steps=steps, phase=phase: self._update_analysis_phase(
                                     p, step, steps, phase, total
-                                ),
+                                )
                             ),
                         )
                     ] = path
@@ -724,14 +710,13 @@ class PhotoAnalyzerApp:
                     except Exception as exc:
                         error = str(exc)
                     done += 1
-                    self.root.after(
-                        0,
+                    self._dispatch_ui(
                         lambda p=path, r=result, e=error, d=done, t=total: self._handle_analysis_item_done(
                             p, r, e, d, t
-                        ),
+                        )
                     )
 
-            self.root.after(0, lambda: self._analysis_finished(total))
+            self._dispatch_ui(lambda: self._analysis_finished(total))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -764,8 +749,8 @@ class PhotoAnalyzerApp:
                 save_stats(self.stats)
 
         self.progress_controller.update(
-            done=done,
-            total=total,
+            done=sum(self.analysis_phase_progress.values()),
+            total=total * ANALYSIS_PROGRESS_STEPS,
             title=f"分析中 {done}/{total}",
             detail=f"最近完成：{path.name}",
             status=f"分析进度 {done}/{total}，最近完成：{path.name}",
@@ -819,7 +804,7 @@ class PhotoAnalyzerApp:
                         self.results[path] = result
                         self.errors.pop(path, None)
                 step += 1
-                self.root.after(0, lambda s=step, t=total_steps, name=path.name: self._update_progress(s, t, name, "修复前分析"))
+                self._dispatch_ui(lambda s=step, t=total_steps, name=path.name: self._update_progress(s, t, name, "修复前分析"))
 
             for path in targets:
                 if path in self.errors:
@@ -827,7 +812,7 @@ class PhotoAnalyzerApp:
                         failed.append((path, self.errors[path]))
                         failed_paths.add(path)
                     step += 1
-                    self.root.after(0, lambda s=step, t=total_steps, name=path.name: self._update_progress(s, t, name, "跳过失败项"))
+                    self._dispatch_ui(lambda s=step, t=total_steps, name=path.name: self._update_progress(s, t, name, "跳过失败项"))
                     continue
 
                 try:
@@ -850,9 +835,9 @@ class PhotoAnalyzerApp:
                         save_stats(self.stats)
 
                 step += 1
-                self.root.after(0, lambda s=step, t=total_steps, name=path.name: self._update_progress(s, t, name, "修复中"))
+                self._dispatch_ui(lambda s=step, t=total_steps, name=path.name: self._update_progress(s, t, name, "修复中"))
 
-            self.root.after(0, lambda: self._repair_finished(repaired, skipped, failed, selection))
+            self._dispatch_ui(lambda: self._repair_finished(repaired, skipped, failed, selection))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -868,13 +853,18 @@ class PhotoAnalyzerApp:
         )
 
     def _update_analysis_phase(self, path: Path, step: int, steps: int, phase: str, total_images: int) -> None:
-        current_done = int(self.progress_value.get())
+        normalized_step = max(0, min(ANALYSIS_PROGRESS_STEPS, int(round(step * ANALYSIS_PROGRESS_STEPS / max(1, steps)))))
+        previous = self.analysis_phase_progress.get(path, 0)
+        if normalized_step > previous:
+            self.analysis_phase_progress[path] = normalized_step
+        aggregate_done = sum(self.analysis_phase_progress.values())
+        finished_images = sum(1 for value in self.analysis_phase_progress.values() if value >= ANALYSIS_PROGRESS_STEPS)
         detail = f"正在分析：{path.name} | {phase} {step}/{steps}"
         if total_images > 1:
-            detail = f"批量分析 {current_done}/{total_images} | {path.name} | {phase} {step}/{steps}"
+            detail = f"批量分析 {finished_images}/{total_images} | {path.name} | {phase} {step}/{steps}"
         self.progress_controller.update(
-            done=current_done,
-            total=max(1, total_images),
+            done=aggregate_done,
+            total=max(1, total_images * ANALYSIS_PROGRESS_STEPS),
             detail=detail,
             status=detail,
             dialog_title="分析图片中",
@@ -886,9 +876,10 @@ class PhotoAnalyzerApp:
         error_count = len(self.errors)
         detail = f"分析完成：问题图片 {issue_count} 张，失败 {error_count} 张。"
         self._log_console(f"analysis finished: count={total} issues={issue_count} errors={error_count}")
+        self.analysis_phase_progress = {}
         self.progress_controller.update(
-            done=total,
-            total=max(1, total),
+            done=total * ANALYSIS_PROGRESS_STEPS,
+            total=max(1, total * ANALYSIS_PROGRESS_STEPS),
             title=f"分析完成 {total}/{total}",
             detail=detail,
             status=detail,
@@ -922,6 +913,11 @@ class PhotoAnalyzerApp:
             dialog_header="正在分析并修复图片",
         )
         self._finish_task(f"修复完成 {total}/{total}", detail)
+
+        for record in repaired:
+            if record.source_path in self.selected_flags:
+                self.selected_flags[record.source_path].set(False)
+
         self.refresh_tree()
 
         lines = [
@@ -1032,10 +1028,19 @@ class PhotoAnalyzerApp:
         self.list_menu.tk_popup(event.x_root, event.y_root)
 
     def remove_current_from_list(self) -> None:
-        path = self._current_path()
-        if path is None:
+        selection = self.tree.selection()
+        if not selection:
             return
-        self._remove_path_from_list(path)
+        paths = [self.item_lookup[item_id] for item_id in selection if item_id in self.item_lookup]
+        if not paths:
+            return
+        for path in paths:
+            self._remove_path_from_list(path, refresh=False)
+        self.refresh_tree()
+        if self.image_paths:
+            self._select_path(self.image_paths[0])
+        else:
+            self._clear_hud_and_summary()
 
     def _merge_paths(self, paths: list[Path]) -> None:
         existing = set(self.image_paths)
@@ -1047,7 +1052,7 @@ class PhotoAnalyzerApp:
             else:
                 self.selected_flags.setdefault(path, tk.BooleanVar(value=False))
 
-    def _remove_path_from_list(self, path: Path) -> None:
+    def _remove_path_from_list(self, path: Path, refresh: bool = True) -> None:
         if path in self.image_paths:
             self.image_paths = [item for item in self.image_paths if item != path]
         self.results.pop(path, None)
@@ -1055,24 +1060,40 @@ class PhotoAnalyzerApp:
         self.selected_flags.pop(path, None)
         self.thumb_cache.evict(path)
         self._log_console(f"removed from list: {path}")
-        self.refresh_tree()
-        if self.image_paths:
-            self._select_path(self.image_paths[0])
-        else:
-            self.chart.update_result(None)
-            self.preview_label.configure(image="")
-            self.preview_image = None
-            self._set_meta_summary("当前列表为空，暂无可查看的属性信息。")
-            self._set_summary("当前列表为空。可继续添加目录、拖入图片或手动选择单张图片。")
+        if refresh:
+            self.refresh_tree()
+            if self.image_paths:
+                self._select_path(self.image_paths[0])
+            else:
+                self._clear_hud_and_summary()
+
+    def _clear_hud_and_summary(self) -> None:
+        self.chart.update_result(None)
+        self.hud_name_var.set("未选择图片")
+        self.hud_risk_var.set("风险值 --")
+        self.hud_tags_var.set("识别结果：等待分析")
+        self.hud_methods_var.set("推荐修复：等待分析")
+        self._set_meta_summary("当前列表为空，暂无可查看的属性信息。")
+        self._set_summary("当前列表为空。可继续添加目录、拖入图片或手动选择单张图片。")
 
     def toggle_cleanup_flag(self, _event=None) -> None:
-        path = self._current_path()
-        if path is None:
+        selection = self.tree.selection()
+        if not selection:
             return
-        self.selected_flags.setdefault(path, tk.BooleanVar(value=False))
-        self.selected_flags[path].set(not self.selected_flags[path].get())
+        paths = [self.item_lookup[item_id] for item_id in selection if item_id in self.item_lookup]
+        if not paths:
+            return
+        
+        # Determine the target state based on the first item
+        first_path = paths[0]
+        self.selected_flags.setdefault(first_path, tk.BooleanVar(value=False))
+        target_state = not self.selected_flags[first_path].get()
+
+        for path in paths:
+            self.selected_flags.setdefault(path, tk.BooleanVar(value=False))
+            self.selected_flags[path].set(target_state)
         self.refresh_tree()
-        self._select_path(path)
+        self._select_path(first_path)
 
     def select_problem_items(self) -> None:
         for path, result in self.results.items():
@@ -1114,11 +1135,8 @@ class PhotoAnalyzerApp:
             self.chart.update_result(None)
             self._set_summary(f"无法加载预览：{exc}")
             self._set_meta_summary(f"文件：{path.name}\n\n读取失败：{exc}")
+            self._update_hud(path, None, None, str(exc))
             return
-
-        preview = self._build_marked_preview(image, result, error)
-        self.preview_image = ImageTk.PhotoImage(preview)
-        self.preview_label.configure(image=self.preview_image)
         self.chart.update_result(result)
         self._update_hud(path, image, result, error)
         self._set_meta_summary(summarize_image_metadata(path))
@@ -1161,8 +1179,14 @@ class PhotoAnalyzerApp:
         self.meta_text.insert("1.0", text)
         self.meta_text.config(state="disabled")
 
-    def _update_hud(self, path: Path, image: Image.Image, result: AnalysisResult | None, error: str | None) -> None:
-        self.hud_name_var.set(f"{path.name}  |  {image.width} x {image.height}")
+    def _update_hud(self, path: Path, image: Image.Image | None, result: AnalysisResult | None, error: str | None) -> None:
+        if image is None:
+            self.hud_name_var.set(path.name)
+        else:
+            try:
+                self.hud_name_var.set(f"{path.name}  |  {image.width} x {image.height}")
+            except Exception:
+                self.hud_name_var.set(path.name)
         if error:
             self.hud_risk_var.set("风险值 --")
             self.hud_tags_var.set(f"识别结果：分析失败 - {error}")
@@ -1182,29 +1206,6 @@ class PhotoAnalyzerApp:
         else:
             self.hud_tags_var.set("识别结果：未发现明显问题")
             self.hud_methods_var.set("推荐修复：可保留原图，无需额外修正")
-
-    def _build_marked_preview(self, image: Image.Image, result: AnalysisResult | None, error: str | None) -> Image.Image:
-        preview = image.copy()
-        preview.thumbnail((760, 420))
-        overlay = Image.new("RGBA", preview.size, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(overlay)
-        font = self._load_overlay_font()
-
-        if error:
-            draw.rounded_rectangle((12, 12, 170, 40), radius=8, fill=(173, 102, 22, 220))
-            draw.text((22, 20), "分析失败", fill="white", font=font)
-        elif result and result.issues:
-            labels = [f"{issue.label} {issue.score:.2f}" for issue in result.issues[:4]]
-            y = 12
-            for label in labels:
-                draw.rounded_rectangle((12, y, 320, y + 30), radius=8, fill=(195, 59, 39, 220))
-                draw.text((22, y + 8), label, fill="white", font=font)
-                y += 38
-        else:
-            draw.rounded_rectangle((12, 12, 180, 40), radius=8, fill=(41, 125, 71, 220))
-            draw.text((22, 20), "未见明显问题", fill="white", font=font)
-
-        return Image.alpha_composite(preview.convert("RGBA"), overlay).convert("RGB")
 
     def _set_summary(self, text: str) -> None:
         self.summary_text.config(state="normal")

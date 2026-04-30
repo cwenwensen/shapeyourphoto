@@ -9,7 +9,7 @@ from PIL import Image, ImageOps
 from models import AnalysisResult, Issue, MetricItem
 
 
-SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
+SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp", ".jfif"}
 
 
 def _level(score: float) -> str:
