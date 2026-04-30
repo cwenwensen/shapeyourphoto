@@ -92,3 +92,5 @@ python -m pip install pillow numpy
 - [watermark_signature.py](/E:/aitools/codexAuto_photosAnalyzer/watermark_signature.py)
 - [MODULES.md](/E:/aitools/codexAuto_photosAnalyzer/MODULES.md)
 - [CHANGELOG.md](/E:/aitools/codexAuto_photosAnalyzer/CHANGELOG.md)
+
+Copyright (c) 2026 Francis Zhang & Helloalp. All rights reserved. No permission is granted to use, copy, modify, or distribute this project without explicit written permission.
