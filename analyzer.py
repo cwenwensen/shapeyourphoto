@@ -183,6 +183,18 @@ def _hue_entropy(hue: np.ndarray, saturation: np.ndarray) -> float:
     return float(entropy / np.log2(12.0))
 
 
+def _masked_mean(values: np.ndarray, mask: np.ndarray, fallback: float) -> float:
+    if np.any(mask):
+        return float(np.mean(values[mask]))
+    return fallback
+
+
+def _masked_percentile(values: np.ndarray, mask: np.ndarray, q: float, fallback: float) -> float:
+    if np.any(mask):
+        return float(np.percentile(values[mask], q))
+    return fallback
+
+
 def analyze_image(
     path: str | Path,
     progress_callback: Callable[[int, int, str], None] | None = None,
@@ -220,6 +232,16 @@ def analyze_image(
     mean_saturation = float(np.mean(saturation))
     high_sat_ratio = float(np.mean(saturation >= 0.82))
     p90_saturation = float(np.percentile(saturation, 90))
+    midtone_mask = (gray > 0.22) & (gray < 0.78)
+    bright_mask = gray > 0.45
+    shadow_mask = gray < 0.25
+    green_dominant_mask = (arr[:, :, 1] > arr[:, :, 0] * 1.08) & (arr[:, :, 1] > arr[:, :, 2] * 1.08)
+    mid_mean_saturation = _masked_mean(saturation, midtone_mask, mean_saturation)
+    mid_p90_saturation = _masked_percentile(saturation, midtone_mask, 90, p90_saturation)
+    bright_high_sat_ratio = float(np.mean(bright_mask & (saturation >= 0.82)))
+    shadow_high_sat_ratio = float(np.mean(shadow_mask & (saturation >= 0.72)))
+    green_ratio = float(np.mean(green_dominant_mask))
+    green_high_sat_ratio = float(np.mean(green_dominant_mask & (saturation >= 0.82)))
     skin_ratio = _skin_ratio(arr)
     hue_entropy = _hue_entropy(hue, saturation)
     neutral_mask = (saturation < 0.18) & (gray > 0.18) & (gray < 0.88)
@@ -384,19 +406,27 @@ def analyze_image(
         )
 
     vivid_scene_relief = (
-        max(0.0, hue_entropy - 0.72) * 1.4
-        + max(0.0, dyn_range - 0.62) * 0.4
-        + hdr_hint * 0.28
-        + max(0.0, 0.09 - neutral_balance) * 1.5
+        max(0.0, hue_entropy - 0.72) * 1.1
+        + max(0.0, dyn_range - 0.62) * 0.35
+        + hdr_hint * 0.24
+        + max(0.0, 0.09 - neutral_balance) * 1.2
+    )
+    foliage_shadow_relief = (
+        max(0.0, green_ratio - 0.22) * 1.6
+        + max(0.0, green_high_sat_ratio - 0.12) * 1.8
+        + max(0.0, shadow_high_sat_ratio - 0.18) * 1.3
+        + max(0.0, 0.02 - bright_high_sat_ratio) * 6.0
     )
     over_saturation_score = min(
         1.0,
         max(
             0.0,
-            (mean_saturation - 0.36) * 2.8
-            + (p90_saturation - 0.76) * 2.2
-            + (high_sat_ratio - 0.10) * 1.8,
-            - vivid_scene_relief,
+            (mid_mean_saturation - 0.31) * 2.6
+            + (mid_p90_saturation - 0.78) * 2.0
+            + (bright_high_sat_ratio - 0.012) * 9.0
+            + (high_sat_ratio - 0.12) * 0.75
+            - vivid_scene_relief
+            - foliage_shadow_relief,
         ),
     )
     if over_saturation_score >= 0.42:
@@ -405,8 +435,8 @@ def analyze_image(
                 "over_saturated",
                 "饱和度偏高",
                 over_saturation_score,
-                f"平均饱和度 {mean_saturation:.3f} 偏高，高饱和区域占比 {high_sat_ratio:.1%}，颜色可能开始失真。",
-                "建议适度降低饱和度或鲜艳度，优先观察肤色、霓虹灯和高纯色物体是否过于扎眼。",
+                f"中高亮区域饱和度偏强（中间调均值 {mid_mean_saturation:.3f}，亮部高饱和占比 {bright_high_sat_ratio:.1%}），颜色可能开始失真或刺眼。",
+                "建议优先压制中高亮区域的极端颜色，而不是把整张图片一并去色；重点观察肤色、霓虹灯和高纯色物体是否过于扎眼。",
             )
         )
 
@@ -456,7 +486,9 @@ def analyze_image(
         _metric("通道偏差", rgb_balance, f"{rgb_balance:.3f}", "#c98745", max_value=0.28),
         _metric("中性偏差", neutral_balance, f"{neutral_balance:.3f}", "#ad7b45", max_value=0.18),
         _metric("平均饱和度", mean_saturation, f"{mean_saturation:.3f}", "#c96d7e", max_value=0.6),
+        _metric("中间调饱和度", mid_mean_saturation, f"{mid_mean_saturation:.3f}", "#c05b70", max_value=0.6),
         _metric("高饱和占比", high_sat_ratio, f"{high_sat_ratio:.1%}", "#b95773"),
+        _metric("亮部高饱和", bright_high_sat_ratio, f"{bright_high_sat_ratio:.1%}", "#b04e68", max_value=0.18),
         _metric("色相分布", hue_entropy, f"{hue_entropy:.3f}", "#9f6ac9"),
         _metric("肤色占比", skin_ratio, f"{skin_ratio:.1%}", "#cc8c73", max_value=0.2),
         _metric("噪声指标", noise_score_raw, f"{noise_score_raw:.4f}", "#7c9db7", max_value=0.05),

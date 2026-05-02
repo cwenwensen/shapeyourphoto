@@ -42,6 +42,13 @@ python app.py
 setup_deps.bat
 ```
 
+## 维护文档
+
+- 正式维护文档目录： [docs/README.md](/E:/aitools/shapeyourphoto/docs/README.md)
+- 文档保留规则： [docs/PRESERVATION_RULES.md](/E:/aitools/shapeyourphoto/docs/PRESERVATION_RULES.md)
+
+后续接手时，请优先阅读 `docs/`，并保留该目录及其正式文档。
+
 ## 使用说明
 
 1. 选择一个目录，或直接选择单张图片。

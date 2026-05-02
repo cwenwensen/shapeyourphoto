@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import queue
 import threading
 import tkinter as tk
@@ -12,6 +13,7 @@ from PIL import Image, ImageOps
 from analyzer import analyze_image
 from app_console import AppConsole
 from app_metadata import APP_NAME, APP_VERSION
+from debug_open_dialog import DebugOpenEntry, show_debug_open_dialog
 from diagnostics_chart import DiagnosticsChart
 from drag_drop import WindowsFileDropTarget
 from file_actions import export_cleanup_list, move_to_cleanup_folder, scan_image_paths, scan_image_paths_with_progress
@@ -60,6 +62,7 @@ class PhotoAnalyzerApp:
         self.status_var = tk.StringVar(value="请选择图片目录开始分析。" if not self.single_mode else "请选择单张图片开始分析。")
         self.filter_var = tk.StringVar(value="全部")
         self.only_problem_var = tk.BooleanVar(value=True)
+        self.debug_open_after_repair_var = tk.BooleanVar(value=False)
         self.progress_text_var = tk.StringVar(value="等待任务")
         self.progress_detail_var = tk.StringVar(value="尚未开始。")
         self.progress_value = tk.DoubleVar(value=0.0)
@@ -206,8 +209,14 @@ class PhotoAnalyzerApp:
         filter_box.bind("<<ComboboxSelected>>", lambda _: self.refresh_tree())
         auto_check = ttk.Checkbutton(toolbar, text="默认勾选问题图", variable=self.only_problem_var)
         auto_check.pack(side="left")
+        debug_open_check = ttk.Checkbutton(
+            toolbar,
+            text="调试模式：修复后选择打开前后对比",
+            variable=self.debug_open_after_repair_var,
+        )
+        debug_open_check.pack(side="left", padx=(12, 0))
         ttk.Label(toolbar, text="提示：支持目录/图片拖入，分栏边界可拖动调整。", style="Sub.TLabel").pack(side="right")
-        self.control_widgets.extend([filter_box, auto_check])
+        self.control_widgets.extend([filter_box, auto_check, debug_open_check])
 
         progress_panel = ttk.LabelFrame(top_shell, text="任务进度", padding=14)
         progress_panel.pack(fill="x", pady=(0, 2))
@@ -937,6 +946,56 @@ class PhotoAnalyzerApp:
             lines.append(f"输出目录：{Path(self._resolve_base_folder()).resolve() / selection.output_folder_name}")
             lines.append(f"文件后缀：{selection.filename_suffix or '(无后缀)'}")
         messagebox.showinfo("修复完成", "\n".join(lines))
+
+        if self.debug_open_after_repair_var.get() and repaired:
+            entries = [
+                DebugOpenEntry(
+                    display_name=record.source_path.name,
+                    source_path=record.source_path,
+                    output_path=record.output_path,
+                )
+                for record in repaired
+            ]
+            chosen = show_debug_open_dialog(self.root, entries)
+            if chosen:
+                self._open_debug_pairs(chosen)
+
+    def _open_debug_pairs(self, entries: list[DebugOpenEntry]) -> None:
+        missing: list[str] = []
+        open_targets: list[Path] = []
+        for entry in entries:
+            for path, label in ((entry.source_path, "原图"), (entry.output_path, "修复图")):
+                if not path.exists():
+                    message = f"{entry.display_name} 的{label}不存在：{path}"
+                    missing.append(message)
+                    self._log_console(f"debug open missing: {message}")
+                    continue
+                open_targets.append(path)
+
+        if missing:
+            messagebox.showwarning("打开失败", "以下文件不存在，已跳过：\n\n" + "\n".join(missing[:8]))
+
+        if not open_targets:
+            return
+
+        def worker() -> None:
+            errors: list[str] = []
+            startfile = getattr(os, "startfile", None)
+            if startfile is None:
+                errors.append("当前系统不支持 os.startfile。")
+            else:
+                for path in open_targets:
+                    try:
+                        startfile(str(path))
+                    except Exception as exc:
+                        errors.append(f"{path.name}: {exc}")
+                        self._log_console(f"debug open failed: {path} | {exc}")
+            if errors:
+                self._dispatch_ui(
+                    lambda msgs=errors: messagebox.showwarning("打开失败", "部分文件未能打开：\n\n" + "\n".join(msgs[:8]))
+                )
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _sorted_paths(self) -> list[Path]:
         visible: list[Path] = []

@@ -68,6 +68,7 @@ def _build_jpeg_exif(source_exif: bytes | None, source_name: str) -> Image.Exif:
     exif[0x0131] = SOFTWARE_NAME
     exif[0x013B] = AUTHOR_NAME
     exif[0x010E] = title
+    exif[0x0112] = 1
     exif[0x9C9B] = (title + "\x00").encode("utf-16le")
     exif[0x9C9C] = (f"Modified by {SOFTWARE_NAME} | {AUTHOR_NAME} | {AUTHOR_URL}" + "\x00").encode("utf-16le")
     exif[0x8298] = f"Modified by {SOFTWARE_NAME} | {AUTHOR_NAME} | {AUTHOR_URL}"

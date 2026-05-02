@@ -29,3 +29,5 @@ originals/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+usage_stats.json

@@ -109,8 +109,24 @@ def boost_vibrance(image: Image.Image, result: AnalysisResult | None = None) -> 
 
 def reduce_saturation(image: Image.Image, result: AnalysisResult | None = None) -> Image.Image:
     score = _issue_score(result, "over_saturated", 0.4)
-    factor = max(0.72, 0.96 - score * 0.18)
-    return ImageEnhance.Color(image).enhance(factor)
+    arr = as_array(image)
+    luma = arr[:, :, 0] * 0.299 + arr[:, :, 1] * 0.587 + arr[:, :, 2] * 0.114
+    maxc = np.max(arr, axis=2)
+    minc = np.min(arr, axis=2)
+    saturation = np.divide(maxc - minc, np.maximum(maxc, 1e-6), out=np.zeros_like(maxc), where=maxc > 1e-6)
+
+    focus = np.clip((saturation - 0.68) / 0.24, 0.0, 1.0)
+    extreme = np.clip((saturation - 0.84) / 0.12, 0.0, 1.0)
+    brightness_weight = 0.30 + 0.70 * np.clip((luma - 0.18) / 0.36, 0.0, 1.0)
+    green_dominant = (arr[:, :, 1] > arr[:, :, 0] * 1.08) & (arr[:, :, 1] > arr[:, :, 2] * 1.08)
+    foliage_guard = green_dominant.astype(np.float32) * np.clip((0.55 - luma) / 0.35, 0.0, 1.0) * 0.45
+
+    strength = 0.08 + score * 0.18
+    weight = np.clip(focus * brightness_weight * (1.0 + extreme * 0.75) * (1.0 - foliage_guard), 0.0, 1.0)
+
+    gray = luma[:, :, None]
+    blended = arr * (1.0 - strength * weight[:, :, None]) + gray * (strength * weight[:, :, None])
+    return from_array(blended)
 
 
 def boost_clarity(image: Image.Image, result: AnalysisResult | None = None) -> Image.Image:
