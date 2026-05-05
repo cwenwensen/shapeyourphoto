@@ -64,21 +64,26 @@
 
 - 单张图片分析核心
 - 负责亮度、对比、锐度、色彩、噪声、饱和度等判断
+- 新增轻量人像感知分析，用于区分人像主体、背景与高亮区域
 - 输出 `AnalysisResult`
 
 ### [repair_planner.py](/E:/aitools/shapeyourphoto/repair_planner.py)
 
 - 把问题标签映射到修复方法
+- 现已为暗背景和高调背景人像增加局部修复策略与背景保护策略
 
 ### [repair_ops.py](/E:/aitools/shapeyourphoto/repair_ops.py)
 
 - 各类具体修复算子
 - 修改这里时要重点关注视觉副作用
+- `lift_shadows` 现包含人像主体与暗背景保护逻辑
+- 新增基于粗 mask 的人像局部增强与高调背景保护能力
 
 ### [repair_engine.py](/E:/aitools/shapeyourphoto/repair_engine.py)
 
 - 执行修复链
 - 负责输出文件、元数据写回、EXIF 方向一致性
+- 人像候选修复、评分、回退，以及修复后安全检查都在这里汇总并写回 `RepairRecord`
 
 ## 文件与元数据
 
@@ -129,3 +134,18 @@
 
 - 版本历史
 - 旧版本记录不应删除
+## 1.1.3 Maintenance Addendum
+
+### `analyzer.py`
+
+- 现同时输出 `raw_face_candidates`、`validated_face_boxes`、`face_candidates` 和 `cleanup_candidates`。
+- 新增 `portrait_out_of_focus` 判断，重点关注 validated face / subject 与背景的清晰度差。
+
+### `ui_app.py`
+
+- 新增单独的 cleanup candidate 框体与独立勾选状态。
+- cleanup 候选默认不勾选，且删除按钮只在有勾选时启用。
+
+### `file_actions.py`
+
+- 清理动作统一走安全出口：优先系统回收站，失败时回退到 `_cleanup_candidates` 隔离目录。

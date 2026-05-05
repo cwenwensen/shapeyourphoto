@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 import queue
@@ -13,13 +13,14 @@ from PIL import Image, ImageOps
 from analyzer import analyze_image
 from app_console import AppConsole
 from app_metadata import APP_NAME, APP_VERSION
+from cleanup_review_dialog import CleanupReviewEntry, show_cleanup_review_dialog
 from debug_open_dialog import DebugOpenEntry, show_debug_open_dialog
 from diagnostics_chart import DiagnosticsChart
 from drag_drop import WindowsFileDropTarget
-from file_actions import export_cleanup_list, move_to_cleanup_folder, scan_image_paths, scan_image_paths_with_progress
+from file_actions import CleanupOperationResult, export_cleanup_list, safe_cleanup_paths, scan_image_paths, scan_image_paths_with_progress
 from history_dialog import show_history_dialog
 from metadata_utils import summarize_image_metadata
-from models import AnalysisResult, RepairRecord, RepairSelection
+from models import AnalysisResult, CleanupCandidate, RepairRecord, RepairSelection
 from preview_cache import ThumbnailCache
 from progress_dialog import TaskProgressController
 from repair_dialog import show_repair_dialog
@@ -75,7 +76,9 @@ class PhotoAnalyzerApp:
         self.results: dict[Path, AnalysisResult] = {}
         self.errors: dict[Path, str] = {}
         self.selected_flags: dict[Path, tk.BooleanVar] = {}
+        self.cleanup_flags: dict[Path, tk.BooleanVar] = {}
         self.item_lookup: dict[str, Path] = {}
+        self.cleanup_item_lookup: dict[str, Path] = {}
         self.worker_lock = threading.Lock()
         self.is_busy = False
         self.control_widgets: list[ttk.Widget] = []
@@ -89,6 +92,7 @@ class PhotoAnalyzerApp:
         self.analysis_phase_progress: dict[Path, int] = {}
         self._last_scan_update = 0.0
         self._ui_queue: queue.SimpleQueue = queue.SimpleQueue()
+        self._last_analysis_targets: list[Path] = []
 
         self._configure_style()
         self._build_ui()
@@ -283,6 +287,61 @@ class PhotoAnalyzerApp:
         ttk.Button(action_bar, text="刷新列表", command=self.refresh_tree).pack(side="left")
         ttk.Label(action_bar, text="单击处理状态可切换，右键可移出列表。").pack(side="right")
 
+        cleanup_frame = ttk.LabelFrame(left, text="不适合保留候选", padding=10)
+        cleanup_frame.pack(fill="both", expand=False, pady=(12, 0))
+        cleanup_frame.columnconfigure(0, weight=1)
+        cleanup_frame.rowconfigure(1, weight=1)
+        ttk.Label(
+            cleanup_frame,
+            text="分析完成后会在这里汇总高风险清理候选。默认全部不勾选，需要用户确认后才会执行安全清理。",
+            style="Sub.TLabel",
+        ).grid(row=0, column=0, sticky="w", pady=(0, 8))
+
+        cleanup_tree_frame = ttk.Frame(cleanup_frame, style="Panel.TFrame")
+        cleanup_tree_frame.grid(row=1, column=0, sticky="nsew")
+        cleanup_tree_frame.columnconfigure(0, weight=1)
+        cleanup_tree_frame.rowconfigure(0, weight=1)
+
+        self.cleanup_tree = ttk.Treeview(
+            cleanup_tree_frame,
+            columns=("pick", "severity", "confidence", "reason"),
+            show=("tree", "headings"),
+            selectmode="extended",
+            height=5,
+        )
+        self.cleanup_tree.heading("#0", text="缩略图 / 文件名")
+        self.cleanup_tree.column("#0", width=260, anchor="w")
+        self.cleanup_tree.heading("pick", text="待处理")
+        self.cleanup_tree.column("pick", width=72, anchor="center")
+        self.cleanup_tree.heading("severity", text="严重度")
+        self.cleanup_tree.column("severity", width=72, anchor="center")
+        self.cleanup_tree.heading("confidence", text="置信度")
+        self.cleanup_tree.column("confidence", width=72, anchor="center")
+        self.cleanup_tree.heading("reason", text="主要原因")
+        self.cleanup_tree.column("reason", width=360, anchor="w")
+        cleanup_scroll = ttk.Scrollbar(cleanup_tree_frame, orient="vertical", command=self.cleanup_tree.yview)
+        self.cleanup_tree.configure(yscrollcommand=cleanup_scroll.set)
+        self.cleanup_tree.grid(row=0, column=0, sticky="nsew")
+        cleanup_scroll.grid(row=0, column=1, sticky="ns")
+        self.cleanup_tree.bind("<<TreeviewSelect>>", self.on_cleanup_tree_select)
+        self.cleanup_tree.bind("<Button-1>", self.on_cleanup_tree_click, add="+")
+
+        cleanup_action_bar = ttk.Frame(cleanup_frame)
+        cleanup_action_bar.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        self.cleanup_delete_button = ttk.Button(
+            cleanup_action_bar,
+            text="移入安全清理",
+            command=self.cleanup_selected_candidates,
+            state="disabled",
+        )
+        self.cleanup_delete_button.pack(side="left")
+        ttk.Button(cleanup_action_bar, text="勾选当前", command=self.select_cleanup_current).pack(side="left", padx=(6, 0))
+        ttk.Button(cleanup_action_bar, text="切换所选", command=self.toggle_selected_cleanup_candidates).pack(side="left", padx=6)
+        ttk.Button(cleanup_action_bar, text="全选", command=self.select_all_cleanup_candidates).pack(side="left")
+        ttk.Button(cleanup_action_bar, text="取消全选", command=self.unselect_all_cleanup_candidates).pack(side="left", padx=6)
+        self.cleanup_hint_var = tk.StringVar(value="当前没有勾选候选，可直接跳过。")
+        ttk.Label(cleanup_action_bar, textvariable=self.cleanup_hint_var, style="Sub.TLabel").pack(side="right")
+
         ttk.Label(right, text="预览、指标、诊断与信息", style="PanelTitle.TLabel").pack(anchor="w", pady=(0, 8))
         self.right_stack_pane = ttk.PanedWindow(right, orient="vertical")
         self.right_stack_pane.pack(fill="both", expand=True)
@@ -459,6 +518,7 @@ class PhotoAnalyzerApp:
             self.results.clear()
             self.errors.clear()
             self.selected_flags.clear()
+            self.cleanup_flags.clear()
         else:
             self._merge_paths([path])
         self.selected_flags.setdefault(path, tk.BooleanVar(value=False))
@@ -679,6 +739,7 @@ class PhotoAnalyzerApp:
         if total == 0:
             return
         self.analysis_phase_progress = {path: 0 for path in targets}
+        self._last_analysis_targets = list(targets)
 
         self._log_console(f"analysis started: count={total}")
         self._begin_task(
@@ -746,10 +807,33 @@ class PhotoAnalyzerApp:
                 self.results[path] = result
                 self.errors.pop(path, None)
                 labels = ",".join(issue.code for issue in result.issues) if result.issues else "ok"
-                self._log_console(f"analysis done: {path.name} | score={result.overall_score:.2f} | {labels}")
+                face_total = result.face_count
+                face_validated = result.validated_face_count
+                self._log_console(
+                    f"analysis done: {path.name} | score={result.overall_score:.2f} | {labels} | "
+                    f"faces={face_total}/{face_validated} | portrait={result.portrait_likely}"
+                )
+                for candidate in result.face_candidates:
+                    if candidate.accepted or not candidate.rejection_reasons:
+                        continue
+                    self._log_console(
+                        f"face candidate rejected: {path.name} | box={candidate.box} | "
+                        f"conf={candidate.confidence:.2f} | {' / '.join(candidate.rejection_reasons)}"
+                    )
+                if result.portrait_rejection_reason:
+                    self._log_console(f"portrait-aware skipped: {path.name} | {result.portrait_rejection_reason}")
+                for cleanup_candidate in result.cleanup_candidates:
+                    self._log_console(
+                        f"cleanup candidate: {path.name} | {cleanup_candidate.reason_code} | "
+                        f"{cleanup_candidate.severity} | conf={cleanup_candidate.confidence:.2f}"
+                    )
+                for note in result.perf_notes:
+                    self._log_console(f"analysis perf: {path.name} | {note}")
                 if self.only_problem_var.get() and result.issues:
                     self.selected_flags.setdefault(path, tk.BooleanVar(value=False))
                     self.selected_flags[path].set(True)
+                if path in self.cleanup_flags and path not in self._primary_cleanup_candidates():
+                    self.cleanup_flags.pop(path, None)
                 self.stats = record_analysis(
                     self.stats,
                     image_bytes=path.stat().st_size if path.exists() else 0,
@@ -795,7 +879,7 @@ class PhotoAnalyzerApp:
         def worker() -> None:
             step = 0
             repaired: list[RepairRecord] = []
-            skipped: list[Path] = []
+            skipped: list[RepairRecord] = []
             failed: list[tuple[Path, str]] = []
             failed_paths: set[Path] = set()
 
@@ -832,16 +916,37 @@ class PhotoAnalyzerApp:
                     self._log_console(f"repair failed: {path.name} | {exc}")
                 else:
                     if record is None:
-                        skipped.append(path)
-                        self._log_console(f"repair skipped: {path.name}")
-                    else:
-                        repaired.append(record)
-                        self._log_console(f"repair done: {path.name} -> {record.output_path}")
-                        self.stats = record_repair(
-                            self.stats,
-                            image_bytes=record.output_path.stat().st_size if record.output_path.exists() else 0,
+                        skipped.append(
+                            RepairRecord(
+                                source_path=path,
+                                output_path=path,
+                                method_ids=[],
+                                saved_output=False,
+                                skipped_reason="修复引擎未返回可保存结果。",
+                            )
                         )
-                        save_stats(self.stats)
+                        self._log_console(f"repair skipped: {path.name} | 修复引擎未返回可保存结果。")
+                    else:
+                        if not record.saved_output:
+                            skipped.append(record)
+                            reason = record.skipped_reason or "当前方案未生成修复输出。"
+                            self._log_console(f"repair skipped: {path.name} | {reason}")
+                            for note in record.policy_notes:
+                                self._log_console(f"repair note: {path.name} | {note}")
+                            for note in record.perf_notes:
+                                self._log_console(f"repair perf: {path.name} | {note}")
+                        else:
+                            repaired.append(record)
+                            self._log_console(f"repair done: {path.name} -> {record.output_path}")
+                            for note in record.policy_notes:
+                                self._log_console(f"repair note: {path.name} | {note}")
+                            for note in record.perf_notes:
+                                self._log_console(f"repair perf: {path.name} | {note}")
+                            self.stats = record_repair(
+                                self.stats,
+                                image_bytes=record.output_path.stat().st_size if record.output_path.exists() else 0,
+                            )
+                            save_stats(self.stats)
 
                 step += 1
                 self._dispatch_ui(lambda s=step, t=total_steps, name=path.name: self._update_progress(s, t, name, "修复中"))
@@ -899,11 +1004,52 @@ class PhotoAnalyzerApp:
         current = self._current_path()
         if current is not None:
             self.show_preview(current)
+        self._maybe_prompt_cleanup_candidates(self._last_analysis_targets)
+        self._last_analysis_targets = []
+
+    def _maybe_prompt_cleanup_candidates(self, paths: list[Path]) -> None:
+        if not paths:
+            return
+        primary_candidates = self._primary_cleanup_candidates()
+        matched_paths = [path for path in paths if path in primary_candidates]
+        if not matched_paths:
+            return
+
+        first_path = matched_paths[0]
+        self._select_path(first_path)
+        self._select_cleanup_path(first_path)
+        entries = [
+            CleanupReviewEntry(
+                image_path=path,
+                display_name=path.name,
+                reason_code=primary_candidates[path].reason_code,
+                reason_text=primary_candidates[path].reason_text,
+                severity=primary_candidates[path].severity,
+                confidence=primary_candidates[path].confidence,
+            )
+            for path in matched_paths
+        ]
+        dialog_result = show_cleanup_review_dialog(self.root, entries)
+        if dialog_result is None:
+            return
+
+        for path in matched_paths:
+            self.cleanup_flags.setdefault(path, tk.BooleanVar(value=False))
+            self.cleanup_flags[path].set(False)
+        for path in dialog_result.chosen_paths:
+            self.cleanup_flags.setdefault(path, tk.BooleanVar(value=False))
+            self.cleanup_flags[path].set(True)
+        self.refresh_tree()
+        if dialog_result.chosen_paths:
+            self._select_path(dialog_result.chosen_paths[0])
+            self._select_cleanup_path(dialog_result.chosen_paths[0])
+        if dialog_result.action == "delete" and dialog_result.chosen_paths:
+            self.cleanup_selected_candidates()
 
     def _repair_finished(
         self,
         repaired: list[RepairRecord],
-        skipped: list[Path],
+        skipped: list[RepairRecord],
         failed: list[tuple[Path, str]],
         selection: RepairSelection,
     ) -> None:
@@ -945,6 +1091,17 @@ class PhotoAnalyzerApp:
         else:
             lines.append(f"输出目录：{Path(self._resolve_base_folder()).resolve() / selection.output_folder_name}")
             lines.append(f"文件后缀：{selection.filename_suffix or '(无后缀)'}")
+        if skipped:
+            lines.append("")
+            lines.append("跳过原因：")
+            for record in skipped[:8]:
+                reason = record.skipped_reason or "当前方案未生成修复输出。"
+                lines.append(f"- {record.source_path.name}：{reason}")
+        if failed:
+            lines.append("")
+            lines.append("失败详情：")
+            for path, message in failed[:5]:
+                lines.append(f"- {path.name}：{message}")
         messagebox.showinfo("修复完成", "\n".join(lines))
 
         if self.debug_open_after_repair_var.get() and repaired:
@@ -1006,6 +1163,79 @@ class PhotoAnalyzerApp:
                 visible.append(path)
         return sort_paths(visible, self.results, self.errors, self.sort_column, self.sort_reverse)
 
+    def _cleanup_severity_rank(self, severity: str) -> int:
+        order = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+        return order.get(severity.lower(), 0)
+
+    def _primary_cleanup_candidates(self) -> dict[Path, CleanupCandidate]:
+        primary: dict[Path, CleanupCandidate] = {}
+        for path, result in self.results.items():
+            if not result.cleanup_candidates:
+                continue
+            best = sorted(
+                result.cleanup_candidates,
+                key=lambda candidate: (
+                    self._cleanup_severity_rank(candidate.severity),
+                    candidate.confidence,
+                ),
+                reverse=True,
+            )[0]
+            primary[path] = best
+        return primary
+
+    def _current_cleanup_path(self) -> Path | None:
+        selection = self.cleanup_tree.selection()
+        if not selection:
+            return None
+        return self.cleanup_item_lookup.get(selection[0])
+
+    def _refresh_cleanup_tree(self) -> None:
+        current_path = self._current_cleanup_path()
+        primary_candidates = self._primary_cleanup_candidates()
+        for item in self.cleanup_tree.get_children():
+            self.cleanup_tree.delete(item)
+        self.cleanup_item_lookup.clear()
+
+        for path in list(self.cleanup_flags):
+            if path not in primary_candidates:
+                self.cleanup_flags.pop(path, None)
+        for path in primary_candidates:
+            self.cleanup_flags.setdefault(path, tk.BooleanVar(value=False))
+
+        ordered_paths = sort_paths(
+            [path for path in self.image_paths if path in primary_candidates],
+            self.results,
+            self.errors,
+            self.sort_column,
+            self.sort_reverse,
+        )
+        for path in ordered_paths:
+            candidate = primary_candidates[path]
+            checked = "已选" if self.cleanup_flags.get(path, tk.BooleanVar(value=False)).get() else "待定"
+            confidence = f"{candidate.confidence:.2f}"
+            thumb = self.thumb_cache.get_tree_thumbnail(path)
+            item_id = self.cleanup_tree.insert(
+                "",
+                "end",
+                text=path.name,
+                image=thumb,
+                values=(checked, candidate.severity, confidence, candidate.reason_text),
+            )
+            self.cleanup_item_lookup[item_id] = path
+            if path == current_path:
+                self.cleanup_tree.selection_set(item_id)
+
+        self._update_cleanup_controls()
+
+    def _update_cleanup_controls(self) -> None:
+        selected_count = len([path for path, flag in self.cleanup_flags.items() if flag.get()])
+        if selected_count > 0:
+            self.cleanup_delete_button.configure(state="normal")
+            self.cleanup_hint_var.set(f"已勾选 {selected_count} 张候选，左侧按钮会执行安全清理。")
+        else:
+            self.cleanup_delete_button.configure(state="disabled")
+            self.cleanup_hint_var.set("当前没有勾选候选，可直接跳过。")
+
     def refresh_tree(self) -> None:
         current_path = self._current_path()
         for item in self.tree.get_children():
@@ -1032,6 +1262,7 @@ class PhotoAnalyzerApp:
             self.item_lookup[item_id] = path
             if path == current_path:
                 self.tree.selection_set(item_id)
+        self._refresh_cleanup_tree()
 
     def _matches_filter(self, result: AnalysisResult | None, error: str | None) -> bool:
         chosen = self.filter_var.get()
@@ -1059,6 +1290,13 @@ class PhotoAnalyzerApp:
                 self.show_preview(path)
                 break
 
+    def _select_cleanup_path(self, path: Path) -> None:
+        for item_id, item_path in self.cleanup_item_lookup.items():
+            if item_path == path:
+                self.cleanup_tree.selection_set(item_id)
+                self.cleanup_tree.see(item_id)
+                break
+
     def on_tree_select(self, _event=None) -> None:
         path = self._current_path()
         if path is not None:
@@ -1078,6 +1316,64 @@ class PhotoAnalyzerApp:
             self.selected_flags[path].set(not self.selected_flags[path].get())
             self.refresh_tree()
             self._select_path(path)
+
+    def on_cleanup_tree_select(self, _event=None) -> None:
+        path = self._current_cleanup_path()
+        if path is not None:
+            self._select_path(path)
+
+    def on_cleanup_tree_click(self, event) -> None:
+        item_id = self.cleanup_tree.identify_row(event.y)
+        column = self.cleanup_tree.identify_column(event.x)
+        if not item_id:
+            return
+        self.cleanup_tree.selection_set(item_id)
+        path = self.cleanup_item_lookup.get(item_id)
+        if path is None:
+            return
+        if column == "#1":
+            self.cleanup_flags.setdefault(path, tk.BooleanVar(value=False))
+            self.cleanup_flags[path].set(not self.cleanup_flags[path].get())
+            self._refresh_cleanup_tree()
+            self._select_cleanup_path(path)
+            self._select_path(path)
+
+    def select_cleanup_current(self) -> None:
+        path = self._current_cleanup_path() or self._current_path()
+        if path is None or path not in self._primary_cleanup_candidates():
+            return
+        self.cleanup_flags.setdefault(path, tk.BooleanVar(value=False))
+        self.cleanup_flags[path].set(True)
+        self._refresh_cleanup_tree()
+        self._select_path(path)
+
+    def toggle_selected_cleanup_candidates(self) -> None:
+        selection = self.cleanup_tree.selection()
+        if not selection:
+            return
+        paths = [self.cleanup_item_lookup[item_id] for item_id in selection if item_id in self.cleanup_item_lookup]
+        if not paths:
+            return
+        first_path = paths[0]
+        self.cleanup_flags.setdefault(first_path, tk.BooleanVar(value=False))
+        target_state = not self.cleanup_flags[first_path].get()
+        for path in paths:
+            self.cleanup_flags.setdefault(path, tk.BooleanVar(value=False))
+            self.cleanup_flags[path].set(target_state)
+        self._refresh_cleanup_tree()
+        self._select_cleanup_path(first_path)
+        self._select_path(first_path)
+
+    def select_all_cleanup_candidates(self) -> None:
+        for path in self._primary_cleanup_candidates():
+            self.cleanup_flags.setdefault(path, tk.BooleanVar(value=False))
+            self.cleanup_flags[path].set(True)
+        self._refresh_cleanup_tree()
+
+    def unselect_all_cleanup_candidates(self) -> None:
+        for flag in self.cleanup_flags.values():
+            flag.set(False)
+        self._refresh_cleanup_tree()
 
     def open_context_menu(self, event) -> None:
         item_id = self.tree.identify_row(event.y)
@@ -1117,6 +1413,7 @@ class PhotoAnalyzerApp:
         self.results.pop(path, None)
         self.errors.pop(path, None)
         self.selected_flags.pop(path, None)
+        self.cleanup_flags.pop(path, None)
         self.thumb_cache.evict(path)
         self._log_console(f"removed from list: {path}")
         if refresh:
@@ -1211,6 +1508,42 @@ class PhotoAnalyzerApp:
         elif result:
             lines.append(f"总体风险值：{result.overall_score:.2f}")
             lines.append("")
+            lines.append(
+                f"人像判断：{'是' if result.portrait_likely else '否'} | "
+                f"候选/有效人脸：{result.face_count}/{result.validated_face_count}"
+            )
+            if result.portrait_scene_type:
+                lines.append(f"人像场景：{result.portrait_scene_type}")
+            if result.portrait_repair_policy:
+                lines.append(f"修复策略：{result.portrait_repair_policy}")
+            if result.portrait_rejection_reason:
+                lines.append(f"未启用 portrait-aware：{result.portrait_rejection_reason}")
+            rejected_face_notes = [
+                f"{candidate.box} | {candidate.confidence:.2f} | {' / '.join(candidate.rejection_reasons)}"
+                for candidate in result.face_candidates
+                if not candidate.accepted and candidate.rejection_reasons
+            ]
+            if rejected_face_notes:
+                lines.append("低置信度候选拒绝：")
+                for note in rejected_face_notes[:4]:
+                    lines.append(f"- {note}")
+            if result.cleanup_candidates:
+                primary_cleanup = sorted(
+                    result.cleanup_candidates,
+                    key=lambda candidate: (self._cleanup_severity_rank(candidate.severity), candidate.confidence),
+                    reverse=True,
+                )[0]
+                lines.append("")
+                lines.append("不适合保留候选：")
+                lines.append(
+                    f"- {primary_cleanup.reason_code} | {primary_cleanup.severity} | {primary_cleanup.confidence:.2f}"
+                )
+                lines.append(f"  原因：{primary_cleanup.reason_text}")
+            if result.perf_notes:
+                lines.append("性能提示：")
+                for note in result.perf_notes:
+                    lines.append(f"- {note}")
+                lines.append("")
             lines.append("关键指标：")
             for metric in result.metrics:
                 lines.append(f"- {metric.label}：{metric.value}")
@@ -1260,11 +1593,27 @@ class PhotoAnalyzerApp:
         if result.issues:
             tags = "、".join(issue.label for issue in result.issues[:4])
             methods = "、".join(get_method_labels(suggest_methods_for_result(result))) or "暂无明确推荐"
-            self.hud_tags_var.set(f"识别结果：{tags}")
-            self.hud_methods_var.set(f"推荐修复：{methods}")
+            face_info = f" | 人脸 {result.validated_face_count}" if result.validated_face_count else ""
+            cleanup_hint = " | 建议删除候选" if result.cleanup_candidates else ""
+            self.hud_tags_var.set(f"识别结果：{tags}{face_info}{cleanup_hint}")
+            if result.cleanup_candidates:
+                primary_cleanup = sorted(
+                    result.cleanup_candidates,
+                    key=lambda candidate: (self._cleanup_severity_rank(candidate.severity), candidate.confidence),
+                    reverse=True,
+                )[0]
+                self.hud_methods_var.set(
+                    f"推荐修复：{methods} | 清理建议：{primary_cleanup.reason_code} ({primary_cleanup.severity})"
+                )
+            else:
+                self.hud_methods_var.set(f"推荐修复：{methods}")
         else:
-            self.hud_tags_var.set("识别结果：未发现明显问题")
-            self.hud_methods_var.set("推荐修复：可保留原图，无需额外修正")
+            portrait_hint = f" | {result.portrait_scene_type}" if result.portrait_likely and result.portrait_scene_type else ""
+            self.hud_tags_var.set(f"识别结果：未发现明显问题{portrait_hint}")
+            if result.portrait_rejection_reason:
+                self.hud_methods_var.set(f"推荐修复：未启用人像策略，{result.portrait_rejection_reason}")
+            else:
+                self.hud_methods_var.set("推荐修复：可保留原图，无需额外修正")
 
     def _set_summary(self, text: str) -> None:
         self.summary_text.config(state="normal")
@@ -1273,7 +1622,10 @@ class PhotoAnalyzerApp:
         self.summary_text.config(state="disabled")
 
     def export_selected(self) -> None:
-        chosen = [path for path, flag in self.selected_flags.items() if flag.get()]
+        cleanup_primary = self._primary_cleanup_candidates()
+        chosen = [path for path, flag in self.cleanup_flags.items() if flag.get() and path in cleanup_primary]
+        if not chosen:
+            chosen = [path for path, flag in self.selected_flags.items() if flag.get()]
         if not chosen:
             messagebox.showinfo("提示", "当前没有勾选需要处理的图片。")
             return
@@ -1282,28 +1634,72 @@ class PhotoAnalyzerApp:
         self.status_var.set(f"已导出清理清单：{output}")
         messagebox.showinfo("完成", f"已导出清理清单：\n{output}")
 
+    def cleanup_selected_candidates(self) -> None:
+        primary_candidates = self._primary_cleanup_candidates()
+        chosen = [path for path, flag in self.cleanup_flags.items() if flag.get() and path in primary_candidates and path.exists()]
+        if not chosen:
+            self._update_cleanup_controls()
+            return
+
+        preview_lines = []
+        for path in chosen[:5]:
+            candidate = primary_candidates[path]
+            preview_lines.append(f"- {path.name} | {candidate.reason_code} | {candidate.severity}")
+        if len(chosen) > 5:
+            preview_lines.append(f"... 另外 {len(chosen) - 5} 张")
+        confirm = messagebox.askyesno(
+            "确认安全清理",
+            "将优先尝试移入系统回收站；若系统不支持，则移入项目内安全隔离目录 `_cleanup_candidates`。\n\n"
+            f"本次共 {len(chosen)} 张：\n" + "\n".join(preview_lines) + "\n\n是否继续？",
+        )
+        if not confirm:
+            return
+
+        operation = safe_cleanup_paths(chosen, self._resolve_base_folder())
+        for path in chosen:
+            self._remove_path_from_list(path, refresh=False)
+
+        self.image_paths = [path for path in self.image_paths if path.exists()]
+        self.refresh_tree()
+
+        self._log_console(f"cleanup candidates handled: mode={operation.mode} moved={operation.moved} destination={operation.destination_label}")
+        if operation.mode == "recycle_bin":
+            detail = f"已将 {operation.moved} 张图片移入系统回收站。"
+        elif operation.mode == "mixed":
+            detail = f"已处理 {operation.moved} 张图片：{operation.destination_label}"
+        else:
+            detail = f"系统回收站不可用，已将 {operation.moved} 张图片移入安全隔离目录：{operation.destination_label}"
+        self.status_var.set(detail)
+        messagebox.showinfo("完成", detail)
+
     def cleanup_selected(self) -> None:
+        if self._primary_cleanup_candidates():
+            if not any(flag.get() for flag in self.cleanup_flags.values()):
+                messagebox.showinfo("提示", "请先在“不适合保留候选”框体中勾选需要清理的图片。")
+                self._update_cleanup_controls()
+                return
+            self.cleanup_selected_candidates()
+            return
+
         chosen = [path for path, flag in self.selected_flags.items() if flag.get() and path.exists()]
         if not chosen:
             messagebox.showinfo("提示", "当前没有勾选需要清理的图片。")
             return
 
-        target_folder = Path(self._resolve_base_folder()) / "_cleanup_candidates"
         confirm = messagebox.askyesno(
-            "确认清理",
-            f"将把 {len(chosen)} 张图片移动到：\n{target_folder}\n\n是否继续？",
+            "确认安全清理",
+            "将优先尝试移入系统回收站；若系统不支持，则移入项目内安全隔离目录 `_cleanup_candidates`。\n\n"
+            f"本次共 {len(chosen)} 张，是否继续？",
         )
         if not confirm:
             return
 
-        moved, final_folder = move_to_cleanup_folder(chosen, self._resolve_base_folder())
+        operation = safe_cleanup_paths(chosen, self._resolve_base_folder())
         for path in chosen:
-            self.results.pop(path, None)
-            self.errors.pop(path, None)
-            self.selected_flags.pop(path, None)
+            self._remove_path_from_list(path, refresh=False)
 
         self.image_paths = [path for path in self.image_paths if path.exists()]
-        self._log_console(f"cleanup moved: {moved} -> {final_folder}")
         self.refresh_tree()
-        self.status_var.set(f"已移动 {moved} 张图片到清理目录：{final_folder}")
-        messagebox.showinfo("完成", f"已移动 {moved} 张图片到：\n{final_folder}")
+        self._log_console(f"cleanup moved: mode={operation.mode} moved={operation.moved} -> {operation.destination_label}")
+        self.status_var.set(f"已安全清理 {operation.moved} 张图片：{operation.destination_label}")
+        messagebox.showinfo("完成", f"已安全清理 {operation.moved} 张图片：\n{operation.destination_label}")

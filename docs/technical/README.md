@@ -15,6 +15,7 @@
 - [维护指南](/E:/aitools/shapeyourphoto/docs/MAINTENANCE_GUIDE.md)
 - [界面与流程](/E:/aitools/shapeyourphoto/docs/UI_AND_WORKFLOWS.md)
 - [保留规则](/E:/aitools/shapeyourphoto/docs/PRESERVATION_RULES.md)
+- [人像感知分析](/E:/aitools/shapeyourphoto/docs/technical/PORTRAIT_AWARE_ANALYSIS.md)
 
 建议：
 

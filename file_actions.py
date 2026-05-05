@@ -1,10 +1,20 @@
 from __future__ import annotations
 
+import ctypes
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
 from analyzer import is_supported_image
+
+
+@dataclass
+class CleanupOperationResult:
+    moved: int
+    mode: str
+    destination_label: str
+    fallback_folder: Path | None = None
 
 
 def scan_image_paths(folder: str | Path) -> list[Path]:
@@ -60,6 +70,78 @@ def move_to_cleanup_folder(paths: list[Path], base_folder: str | Path) -> tuple[
         moved += 1
 
     return moved, target_folder
+
+
+def _send_path_to_recycle_bin(path: Path) -> bool:
+    if not path.exists():
+        return False
+    if ctypes.sizeof(ctypes.c_void_p) == 0:
+        return False
+    if not hasattr(ctypes, "windll") or not hasattr(ctypes.windll, "shell32"):
+        return False
+
+    class SHFILEOPSTRUCTW(ctypes.Structure):
+        _fields_ = [
+            ("hwnd", ctypes.c_void_p),
+            ("wFunc", ctypes.c_uint),
+            ("pFrom", ctypes.c_wchar_p),
+            ("pTo", ctypes.c_wchar_p),
+            ("fFlags", ctypes.c_ushort),
+            ("fAnyOperationsAborted", ctypes.c_int),
+            ("hNameMappings", ctypes.c_void_p),
+            ("lpszProgressTitle", ctypes.c_wchar_p),
+        ]
+
+    operation = SHFILEOPSTRUCTW()
+    operation.wFunc = 3
+    operation.pFrom = f"{str(path)}\0\0"
+    operation.fFlags = 0x0040 | 0x0010 | 0x0004 | 0x0400
+    result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(operation))
+    return result == 0 and not bool(operation.fAnyOperationsAborted)
+
+
+def safe_cleanup_paths(paths: list[Path], base_folder: str | Path) -> CleanupOperationResult:
+    existing_paths = [path for path in paths if path.exists()]
+    if not existing_paths:
+        return CleanupOperationResult(moved=0, mode="noop", destination_label="无可处理文件")
+
+    recycled = 0
+    fallback_needed = False
+    pending_for_folder: list[Path] = []
+    for path in existing_paths:
+        if _send_path_to_recycle_bin(path):
+            recycled += 1
+        else:
+            fallback_needed = True
+            pending_for_folder.append(path)
+
+    moved = recycled
+    fallback_folder: Path | None = None
+    if pending_for_folder:
+        moved_to_folder, fallback_folder = move_to_cleanup_folder(pending_for_folder, base_folder)
+        moved += moved_to_folder
+
+    if recycled and not fallback_needed:
+        return CleanupOperationResult(
+            moved=moved,
+            mode="recycle_bin",
+            destination_label="系统回收站",
+        )
+    if fallback_folder is not None and recycled:
+        return CleanupOperationResult(
+            moved=moved,
+            mode="mixed",
+            destination_label=f"部分已移入回收站，其余移入 {fallback_folder}",
+            fallback_folder=fallback_folder,
+        )
+    if fallback_folder is not None:
+        return CleanupOperationResult(
+            moved=moved,
+            mode="quarantine_folder",
+            destination_label=str(fallback_folder),
+            fallback_folder=fallback_folder,
+        )
+    return CleanupOperationResult(moved=0, mode="noop", destination_label="无可处理文件")
 
 
 def build_repaired_output_path(
