@@ -23,6 +23,7 @@ from metadata_utils import summarize_image_metadata
 from models import AnalysisResult, CleanupCandidate, RepairRecord, RepairSelection
 from preview_cache import ThumbnailCache
 from progress_dialog import TaskProgressController
+from repair_completion_dialog import show_repair_completion_dialog
 from repair_dialog import show_repair_dialog
 from repair_engine import repair_image_file
 from repair_planner import get_method_labels, get_repair_methods, suggest_methods_for_result, suggest_methods_for_results
@@ -46,6 +47,8 @@ FILTER_OPTIONS = [
 ]
 
 ANALYSIS_PROGRESS_STEPS = 5
+DEFAULT_ANALYSIS_WORKERS = max(1, min(8, os.cpu_count() or 4))
+DEFAULT_REPAIR_WORKERS = max(1, min(4, max(1, (os.cpu_count() or 4) // 2)))
 
 
 class PhotoAnalyzerApp:
@@ -134,6 +137,12 @@ class PhotoAnalyzerApp:
         style.configure("TLabelframe.Label", background="#fbfcfa", foreground="#244333", font=("Microsoft YaHei UI", 11, "bold"))
 
     def _build_ui(self) -> None:
+        menu_bar = tk.Menu(self.root)
+        review_menu = tk.Menu(menu_bar, tearoff=False)
+        review_menu.add_command(label="打开不适合保留候选", command=self.open_cleanup_review_window)
+        menu_bar.add_cascade(label="查看", menu=review_menu)
+        self.root.configure(menu=menu_bar)
+
         outer = ttk.Frame(self.root, padding=18)
         outer.pack(fill="both", expand=True)
 
@@ -248,7 +257,7 @@ class PhotoAnalyzerApp:
             tree_frame,
             columns=("pick", "status", "risk", "tags"),
             show=("tree", "headings"),
-            selectmode="browse",
+            selectmode="extended",
         )
         self.tree.heading("#0", text="预览 / 文件名", command=lambda: self._toggle_sort("name"))
         self.tree.column("#0", width=370, anchor="w")
@@ -460,12 +469,20 @@ class PhotoAnalyzerApp:
 
     def _log_console(self, message: str) -> None:
         self.console.log(message)
-        if hasattr(self, "console_text"):
+        if not hasattr(self, "console_text"):
+            return
+
+        def _update_console() -> None:
             self.console_text.config(state="normal")
             self.console_text.delete("1.0", "end")
             self.console_text.insert("1.0", self.console.dump())
             self.console_text.config(state="disabled")
             self.console_text.see("end")
+
+        if threading.current_thread() is threading.main_thread():
+            _update_console()
+        else:
+            self._dispatch_ui(_update_console)
 
     def choose_folder(self) -> None:
         chosen = filedialog.askdirectory(title="选择图片目录")
@@ -590,7 +607,9 @@ class PhotoAnalyzerApp:
             self._run_analysis(self.image_paths)
 
     def analyze_selected(self) -> None:
-        targets = [path for path, flag in self.selected_flags.items() if flag.get() and path in self.image_paths]
+        targets = [path for path in self._selected_tree_paths() if path in self.image_paths]
+        if not targets:
+            targets = [path for path, flag in self.selected_flags.items() if flag.get() and path in self.image_paths]
         if not targets:
             path = self._current_path()
             if path is not None:
@@ -621,7 +640,9 @@ class PhotoAnalyzerApp:
         self._run_repair([path], selection)
 
     def repair_checked(self) -> None:
-        targets = [path for path, flag in self.selected_flags.items() if flag.get() and path.exists()]
+        targets = [path for path in self._selected_tree_paths() if path.exists()]
+        if not targets:
+            targets = [path for path, flag in self.selected_flags.items() if flag.get() and path.exists()]
         if not targets:
             messagebox.showinfo("提示", "请先勾选至少一张图片。")
             return
@@ -656,6 +677,32 @@ class PhotoAnalyzerApp:
 
     def show_stats(self) -> None:
         show_stats_dialog(self.root, self.stats)
+
+    def _analysis_workers(self, total: int) -> int:
+        return max(1, min(DEFAULT_ANALYSIS_WORKERS, total))
+
+    def _repair_workers(self, total: int) -> int:
+        return max(1, min(DEFAULT_REPAIR_WORKERS, total))
+
+    def _selected_tree_paths(self) -> list[Path]:
+        paths: list[Path] = []
+        for item_id in self.tree.selection():
+            path = self.item_lookup.get(item_id)
+            if path is not None:
+                paths.append(path)
+        return paths
+
+    def _prune_missing_paths(self) -> None:
+        missing = [path for path in self.image_paths if not path.exists()]
+        if not missing:
+            return
+        for path in missing:
+            self.results.pop(path, None)
+            self.errors.pop(path, None)
+            self.selected_flags.pop(path, None)
+            self.cleanup_flags.pop(path, None)
+            self.thumb_cache.evict(path)
+        self.image_paths = [path for path in self.image_paths if path.exists()]
 
     def _set_controls_enabled(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
@@ -740,8 +787,9 @@ class PhotoAnalyzerApp:
             return
         self.analysis_phase_progress = {path: 0 for path in targets}
         self._last_analysis_targets = list(targets)
+        worker_count = self._analysis_workers(total)
 
-        self._log_console(f"analysis started: count={total}")
+        self._log_console(f"analysis started: count={total} workers={worker_count}")
         self._begin_task(
             total * ANALYSIS_PROGRESS_STEPS,
             f"分析中 0/{total}",
@@ -756,7 +804,7 @@ class PhotoAnalyzerApp:
 
         def worker() -> None:
             done = 0
-            with ThreadPoolExecutor(max_workers=min(6, total)) as pool:
+            with ThreadPoolExecutor(max_workers=worker_count) as pool:
                 futures = {}
                 for path in targets:
                     futures[
@@ -864,8 +912,11 @@ class PhotoAnalyzerApp:
 
         missing = [path for path in targets if path not in self.results and path not in self.errors]
         total_steps = len(missing) + len(targets)
+        analysis_workers = self._analysis_workers(len(missing)) if missing else 0
+        repair_workers = self._repair_workers(len(targets))
         self._log_console(
-            f"repair started: count={len(targets)} pre_analyze={len(missing)} mode={selection.mode} overwrite={selection.overwrite_original}"
+            f"repair started: count={len(targets)} pre_analyze={len(missing)} mode={selection.mode} overwrite={selection.overwrite_original} "
+            f"analysis_workers={analysis_workers or 0} repair_workers={repair_workers}"
         )
         self._begin_task(
             total_steps,
@@ -883,73 +934,93 @@ class PhotoAnalyzerApp:
             failed: list[tuple[Path, str]] = []
             failed_paths: set[Path] = set()
 
-            for path in missing:
-                try:
-                    result = analyze_image(path)
-                except Exception as exc:
-                    with self.worker_lock:
-                        self.errors[path] = str(exc)
-                    failed.append((path, str(exc)))
-                    failed_paths.add(path)
-                    self._log_console(f"repair pre-analysis failed: {path.name} | {exc}")
-                else:
-                    with self.worker_lock:
-                        self.results[path] = result
-                        self.errors.pop(path, None)
-                step += 1
-                self._dispatch_ui(lambda s=step, t=total_steps, name=path.name: self._update_progress(s, t, name, "修复前分析"))
+            if missing:
+                with ThreadPoolExecutor(max_workers=analysis_workers) as pool:
+                    futures = {pool.submit(analyze_image, path): path for path in missing}
+                    for future in as_completed(futures):
+                        path = futures[future]
+                        try:
+                            result = future.result()
+                        except Exception as exc:
+                            with self.worker_lock:
+                                self.errors[path] = str(exc)
+                            failed.append((path, str(exc)))
+                            failed_paths.add(path)
+                            self._log_console(f"repair pre-analysis failed: {path.name} | {exc}")
+                        else:
+                            with self.worker_lock:
+                                self.results[path] = result
+                                self.errors.pop(path, None)
+                        step += 1
+                        self._dispatch_ui(lambda s=step, t=total_steps, name=path.name: self._update_progress(s, t, name, "修复前分析"))
+
+            repair_targets = [path for path in targets if path not in failed_paths]
+            with ThreadPoolExecutor(max_workers=repair_workers) as pool:
+                futures = {}
+                for path in repair_targets:
+                    if path in self.errors:
+                        if path not in failed_paths:
+                            failed.append((path, self.errors[path]))
+                            failed_paths.add(path)
+                        step += 1
+                        self._dispatch_ui(lambda s=step, t=total_steps, name=path.name: self._update_progress(s, t, name, "跳过失败项"))
+                        continue
+                    futures[pool.submit(repair_image_file, path, self.results.get(path), selection, self._resolve_base_folder())] = path
+
+                for future in as_completed(futures):
+                    path = futures[future]
+                    try:
+                        record = future.result()
+                    except Exception as exc:
+                        failed.append((path, str(exc)))
+                        failed_paths.add(path)
+                        self._log_console(f"repair failed: {path.name} | {exc}")
+                    else:
+                        if record is None:
+                            skipped.append(
+                                RepairRecord(
+                                    source_path=path,
+                                    output_path=path,
+                                    method_ids=[],
+                                    op_strengths={},
+                                    saved_output=False,
+                                    skipped_reason="修复引擎未返回可保存结果。",
+                                )
+                            )
+                            self._log_console(f"repair skipped: {path.name} | 修复引擎未返回可保存结果。")
+                        else:
+                            if not record.saved_output:
+                                skipped.append(record)
+                                reason = record.skipped_reason or "当前方案未生成修复输出。"
+                                self._log_console(f"repair skipped: {path.name} | {reason}")
+                                for note in record.policy_notes:
+                                    self._log_console(f"repair note: {path.name} | {note}")
+                                for note in record.perf_notes:
+                                    self._log_console(f"repair perf: {path.name} | {note}")
+                            else:
+                                repaired.append(record)
+                                self._log_console(f"repair done: {path.name} -> {record.output_path}")
+                                for note in record.policy_notes:
+                                    self._log_console(f"repair note: {path.name} | {note}")
+                                for note in record.perf_notes:
+                                    self._log_console(f"repair perf: {path.name} | {note}")
+                                self.stats = record_repair(
+                                    self.stats,
+                                    image_bytes=record.output_path.stat().st_size if record.output_path.exists() else 0,
+                                )
+                                save_stats(self.stats)
+
+                    step += 1
+                    self._dispatch_ui(lambda s=step, t=total_steps, name=path.name: self._update_progress(s, t, name, "修复中"))
 
             for path in targets:
                 if path in self.errors:
                     if path not in failed_paths:
                         failed.append((path, self.errors[path]))
                         failed_paths.add(path)
-                    step += 1
-                    self._dispatch_ui(lambda s=step, t=total_steps, name=path.name: self._update_progress(s, t, name, "跳过失败项"))
-                    continue
-
-                try:
-                    record = repair_image_file(path, self.results.get(path), selection, self._resolve_base_folder())
-                except Exception as exc:
-                    failed.append((path, str(exc)))
-                    failed_paths.add(path)
-                    self._log_console(f"repair failed: {path.name} | {exc}")
-                else:
-                    if record is None:
-                        skipped.append(
-                            RepairRecord(
-                                source_path=path,
-                                output_path=path,
-                                method_ids=[],
-                                saved_output=False,
-                                skipped_reason="修复引擎未返回可保存结果。",
-                            )
-                        )
-                        self._log_console(f"repair skipped: {path.name} | 修复引擎未返回可保存结果。")
-                    else:
-                        if not record.saved_output:
-                            skipped.append(record)
-                            reason = record.skipped_reason or "当前方案未生成修复输出。"
-                            self._log_console(f"repair skipped: {path.name} | {reason}")
-                            for note in record.policy_notes:
-                                self._log_console(f"repair note: {path.name} | {note}")
-                            for note in record.perf_notes:
-                                self._log_console(f"repair perf: {path.name} | {note}")
-                        else:
-                            repaired.append(record)
-                            self._log_console(f"repair done: {path.name} -> {record.output_path}")
-                            for note in record.policy_notes:
-                                self._log_console(f"repair note: {path.name} | {note}")
-                            for note in record.perf_notes:
-                                self._log_console(f"repair perf: {path.name} | {note}")
-                            self.stats = record_repair(
-                                self.stats,
-                                image_bytes=record.output_path.stat().st_size if record.output_path.exists() else 0,
-                            )
-                            save_stats(self.stats)
-
-                step += 1
-                self._dispatch_ui(lambda s=step, t=total_steps, name=path.name: self._update_progress(s, t, name, "修复中"))
+                    if path not in repair_targets:
+                        step += 1
+                        self._dispatch_ui(lambda s=step, t=total_steps, name=path.name: self._update_progress(s, t, name, "跳过失败项"))
 
             self._dispatch_ui(lambda: self._repair_finished(repaired, skipped, failed, selection))
 
@@ -1046,6 +1117,37 @@ class PhotoAnalyzerApp:
         if dialog_result.action == "delete" and dialog_result.chosen_paths:
             self.cleanup_selected_candidates()
 
+    def open_cleanup_review_window(self) -> None:
+        self._prune_missing_paths()
+        primary_candidates = self._primary_cleanup_candidates()
+        if not primary_candidates:
+            messagebox.showinfo("提示", "当前没有可重新查看的不适合保留候选。")
+            return
+        ordered_paths = [path for path in self._sorted_paths() if path in primary_candidates]
+        entries = [
+            CleanupReviewEntry(
+                image_path=path,
+                display_name=path.name,
+                reason_code=primary_candidates[path].reason_code,
+                reason_text=primary_candidates[path].reason_text,
+                severity=primary_candidates[path].severity,
+                confidence=primary_candidates[path].confidence,
+            )
+            for path in ordered_paths
+        ]
+        dialog_result = show_cleanup_review_dialog(self.root, entries)
+        if dialog_result is None:
+            return
+        for path in primary_candidates:
+            self.cleanup_flags.setdefault(path, tk.BooleanVar(value=False))
+            self.cleanup_flags[path].set(False)
+        for path in dialog_result.chosen_paths:
+            self.cleanup_flags.setdefault(path, tk.BooleanVar(value=False))
+            self.cleanup_flags[path].set(True)
+        self.refresh_tree()
+        if dialog_result.action == "delete" and dialog_result.chosen_paths:
+            self.cleanup_selected_candidates()
+
     def _repair_finished(
         self,
         repaired: list[RepairRecord],
@@ -1091,18 +1193,44 @@ class PhotoAnalyzerApp:
         else:
             lines.append(f"输出目录：{Path(self._resolve_base_folder()).resolve() / selection.output_folder_name}")
             lines.append(f"文件后缀：{selection.filename_suffix or '(无后缀)'}")
+        detail_lines: list[str] = []
+        if repaired:
+            detail_lines.append("成功记录：")
+            for record in repaired:
+                detail_lines.append(
+                    f"- {record.source_path.name} -> {record.output_path.name} | "
+                    f"ops={','.join(record.method_ids) or 'none'} | "
+                    f"strengths={', '.join(f'{k}:{v:.2f}' for k, v in record.op_strengths.items()) or 'none'}"
+                )
+                for note in record.policy_notes:
+                    detail_lines.append(f"  note: {note}")
+                for warning in record.warnings:
+                    detail_lines.append(f"  warning: {warning}")
         if skipped:
-            lines.append("")
-            lines.append("跳过原因：")
-            for record in skipped[:8]:
+            if detail_lines:
+                detail_lines.append("")
+            detail_lines.append("跳过记录：")
+            for record in skipped:
                 reason = record.skipped_reason or "当前方案未生成修复输出。"
-                lines.append(f"- {record.source_path.name}：{reason}")
+                detail_lines.append(
+                    f"- {record.source_path.name} | reason={reason} | "
+                    f"ops={','.join(record.method_ids) or 'none'} | "
+                    f"strengths={', '.join(f'{k}:{v:.2f}' for k, v in record.op_strengths.items()) or 'none'}"
+                )
+                for note in record.policy_notes:
+                    detail_lines.append(f"  note: {note}")
         if failed:
-            lines.append("")
-            lines.append("失败详情：")
-            for path, message in failed[:5]:
-                lines.append(f"- {path.name}：{message}")
-        messagebox.showinfo("修复完成", "\n".join(lines))
+            if detail_lines:
+                detail_lines.append("")
+            detail_lines.append("失败详情：")
+            for path, message in failed:
+                detail_lines.append(f"- {path.name}：{message}")
+        show_repair_completion_dialog(
+            self.root,
+            title="修复完成",
+            summary_lines=lines,
+            detail_lines=detail_lines,
+        )
 
         if self.debug_open_after_repair_var.get() and repaired:
             entries = [
@@ -1237,6 +1365,7 @@ class PhotoAnalyzerApp:
             self.cleanup_hint_var.set("当前没有勾选候选，可直接跳过。")
 
     def refresh_tree(self) -> None:
+        self._prune_missing_paths()
         current_path = self._current_path()
         for item in self.tree.get_children():
             self.tree.delete(item)
@@ -1297,8 +1426,64 @@ class PhotoAnalyzerApp:
                 self.cleanup_tree.see(item_id)
                 break
 
+    def _show_selection_summary(self, paths: list[Path]) -> None:
+        selected = [path for path in paths if path in self.image_paths]
+        if not selected:
+            self._clear_hud_and_summary()
+            return
+        issue_count = 0
+        analyzed_count = 0
+        scene_types: dict[str, int] = {}
+        exposure_types: dict[str, int] = {}
+        color_types: dict[str, int] = {}
+        cleanup_count = 0
+        for path in selected:
+            result = self.results.get(path)
+            if result is None:
+                continue
+            analyzed_count += 1
+            issue_count += int(bool(result.issues))
+            scene_types[result.scene_type] = scene_types.get(result.scene_type, 0) + 1
+            exposure_types[result.exposure_type] = exposure_types.get(result.exposure_type, 0) + 1
+            color_types[result.color_type] = color_types.get(result.color_type, 0) + 1
+            cleanup_count += int(bool(result.cleanup_candidates))
+
+        self.chart.update_result(None)
+        self.hud_name_var.set(f"已多选 {len(selected)} 张图片")
+        self.hud_risk_var.set(f"已分析 {analyzed_count}/{len(selected)}")
+        scene_label = "、".join(f"{name}:{count}" for name, count in list(scene_types.items())[:3]) or "待分析"
+        self.hud_tags_var.set(f"识别结果：问题图 {issue_count} 张 | 清理候选 {cleanup_count} 张 | 场景 {scene_label}")
+        self.hud_methods_var.set("推荐修复：多选状态下请使用“分析选中”或“批量修复勾选”")
+        self._set_meta_summary("多选状态下不显示单张 EXIF 摘要。请切回单选查看详细属性。")
+        lines = [
+            f"当前多选 {len(selected)} 张图片。",
+            f"已分析 {analyzed_count} 张，其中问题图 {issue_count} 张，清理候选 {cleanup_count} 张。",
+            "",
+            "scene_type 汇总：",
+        ]
+        for name, count in scene_types.items():
+            lines.append(f"- {name}: {count}")
+        lines.append("")
+        lines.append("exposure_type 汇总：")
+        for name, count in exposure_types.items():
+            lines.append(f"- {name}: {count}")
+        lines.append("")
+        lines.append("color_type 汇总：")
+        for name, count in color_types.items():
+            lines.append(f"- {name}: {count}")
+        lines.append("")
+        lines.append("提示：")
+        lines.append("- 可继续用 Ctrl/Shift 扩展多选。")
+        lines.append("- “分析选中”会按当前选择批量分析。")
+        lines.append("- “批量修复勾选”会优先处理当前多选；如无多选则回退到勾选状态。")
+        self._set_summary("\n".join(lines))
+
     def on_tree_select(self, _event=None) -> None:
-        path = self._current_path()
+        paths = self._selected_tree_paths()
+        if len(paths) > 1:
+            self._show_selection_summary(paths)
+            return
+        path = paths[0] if paths else self._current_path()
         if path is not None:
             self.show_preview(path)
 
@@ -1307,11 +1492,11 @@ class PhotoAnalyzerApp:
         column = self.tree.identify_column(event.x)
         if not item_id:
             return
-        self.tree.selection_set(item_id)
-        path = self.item_lookup.get(item_id)
-        if path is None:
-            return
         if column == "#1":
+            self.tree.selection_set(item_id)
+            path = self.item_lookup.get(item_id)
+            if path is None:
+                return
             self.selected_flags.setdefault(path, tk.BooleanVar(value=False))
             self.selected_flags[path].set(not self.selected_flags[path].get())
             self.refresh_tree()
@@ -1510,8 +1695,12 @@ class PhotoAnalyzerApp:
             lines.append("")
             lines.append(
                 f"人像判断：{'是' if result.portrait_likely else '否'} | "
-                f"候选/有效人脸：{result.face_count}/{result.validated_face_count}"
+                f"raw/有效/拒绝：{result.raw_face_count}/{result.validated_face_count}/{result.rejected_face_count}"
             )
+            lines.append(f"portrait_type：{result.portrait_type}")
+            lines.append(f"scene_type：{result.scene_type}")
+            lines.append(f"exposure_type：{result.exposure_type}")
+            lines.append(f"color_type：{result.color_type}")
             if result.portrait_scene_type:
                 lines.append(f"人像场景：{result.portrait_scene_type}")
             if result.portrait_repair_policy:
@@ -1593,7 +1782,7 @@ class PhotoAnalyzerApp:
         if result.issues:
             tags = "、".join(issue.label for issue in result.issues[:4])
             methods = "、".join(get_method_labels(suggest_methods_for_result(result))) or "暂无明确推荐"
-            face_info = f" | 人脸 {result.validated_face_count}" if result.validated_face_count else ""
+            face_info = f" | raw/valid/reject {result.raw_face_count}/{result.validated_face_count}/{result.rejected_face_count}" if (result.raw_face_count or result.validated_face_count or result.rejected_face_count) else ""
             cleanup_hint = " | 建议删除候选" if result.cleanup_candidates else ""
             self.hud_tags_var.set(f"识别结果：{tags}{face_info}{cleanup_hint}")
             if result.cleanup_candidates:

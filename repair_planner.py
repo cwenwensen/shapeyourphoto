@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from models import AnalysisResult, RepairMethod
+from models import AnalysisResult, RepairMethod, RepairPlan, RepairSelection
 
 
 REPAIR_METHODS = [
@@ -145,3 +145,103 @@ def suggest_methods_for_results(results: list[AnalysisResult]) -> list[str]:
 
 def get_method_labels(method_ids: list[str]) -> list[str]:
     return [REPAIR_METHOD_MAP[method_id].label for method_id in method_ids if method_id in REPAIR_METHOD_MAP]
+
+
+def build_repair_plan(result: AnalysisResult | None, selection: RepairSelection) -> RepairPlan:
+    method_ids = suggest_methods_for_result(result) if selection.mode in {"adaptive", "auto"} else list(selection.selected_method_ids)
+    if result is None:
+        return RepairPlan(mode=selection.mode, method_ids=method_ids)
+
+    issue_scores = {item.code: item.score for item in result.issues}
+    under = issue_scores.get("underexposed", 0.0)
+    over = issue_scores.get("overexposed", 0.0)
+    low_contrast = issue_scores.get("low_contrast", 0.0)
+    muted = issue_scores.get("muted_colors", 0.0)
+    over_sat = issue_scores.get("over_saturated", 0.0)
+    blur = max(issue_scores.get("out_of_focus", 0.0), issue_scores.get("portrait_out_of_focus", 0.0))
+    high_noise = issue_scores.get("high_noise", 0.0)
+    color_cast = issue_scores.get("color_cast", 0.0)
+
+    window_guard = result.exposure_type in {"high_contrast_window_scene", "silhouette_scene", "low_key_scene"}
+    unrecoverable_highlights = result.highlight_recovery_type == "unrecoverable_highlights"
+    natural_vivid = result.color_type == "natural_vivid"
+    restrained_natural = result.color_type == "restrained_natural"
+    portrait_enabled = result.portrait_likely and result.validated_face_count > 0
+
+    op_strengths: dict[str, float] = {}
+    notes = [
+        f"scene_type={result.scene_type}",
+        f"portrait_type={result.portrait_type}",
+        f"exposure_type={result.exposure_type}",
+        f"color_type={result.color_type}",
+    ]
+
+    def set_strength(method_id: str, value: float) -> None:
+        op_strengths[method_id] = max(0.06, min(1.0, value))
+
+    for method_id in method_ids:
+        if method_id == "auto_tone":
+            value = 0.44 + low_contrast * 0.26
+            if window_guard:
+                value = min(value, 0.18)
+        elif method_id == "recover_highlights":
+            value = 0.46 + over * 0.34
+            if unrecoverable_highlights:
+                value = min(value, 0.14)
+                notes.append("不可恢复高光：recover_highlights 已限幅，避免天空或白墙压灰。")
+            elif result.exposure_type == "high_contrast_window_scene":
+                value = min(value, 0.16)
+        elif method_id == "lift_shadows":
+            value = 0.44 + under * 0.34
+            if window_guard:
+                value = min(value, 0.12)
+                notes.append("高反差/低调场景：lift_shadows 已强限幅，避免破坏氛围。")
+        elif method_id == "boost_contrast":
+            value = 0.30 + max(low_contrast, muted) * 0.28
+            if window_guard:
+                value = min(value, 0.18)
+        elif method_id == "boost_vibrance":
+            value = 0.18 + muted * 0.24
+            if restrained_natural:
+                value = min(value, 0.14)
+                notes.append("色彩克制但自然：boost_vibrance 已降为保守档。")
+        elif method_id == "reduce_saturation":
+            value = 0.18 + over_sat * 0.24
+            if natural_vivid:
+                value = min(value, 0.14)
+                notes.append("自然高饱和场景：reduce_saturation 已限幅，避免把画面洗灰。")
+        elif method_id == "boost_clarity":
+            value = 0.20 + blur * 0.22
+        elif method_id == "reduce_noise":
+            value = 0.20 + max(high_noise, under * 0.7) * 0.18
+        elif method_id in {"cool_down", "warm_up", "add_magenta", "add_green"}:
+            value = 0.22 + color_cast * 0.20
+        elif method_id == "portrait_local_face_enhance":
+            value = 0.16 if result.portrait_scene_type != "multi_person_portrait" else 0.12
+        elif method_id == "portrait_subject_midcontrast":
+            value = 0.18 if result.portrait_exposure_status == "subject_normal" else 0.22
+        elif method_id == "portrait_dark_clothing_detail":
+            value = 0.16
+        elif method_id == "protect_high_key_background":
+            value = 0.26 if unrecoverable_highlights or result.portrait_scene_type in {"high_key_portrait", "backlit_portrait"} else 0.18
+        else:
+            value = 0.22
+        if selection.mode == "manual" and method_id in {"lift_shadows", "recover_highlights"} and window_guard:
+            notes.append(f"手动选择 {method_id} 仍会遵循场景保护限幅。")
+        set_strength(method_id, value)
+
+    policy = result.portrait_repair_policy or "standard"
+    if not portrait_enabled:
+        if window_guard:
+            policy = "scene_guarded_no_global_lift"
+        elif unrecoverable_highlights:
+            policy = "highlight_rolloff_guard"
+        elif natural_vivid:
+            policy = "natural_vivid_protection"
+    return RepairPlan(
+        mode=selection.mode,
+        method_ids=method_ids,
+        op_strengths=op_strengths,
+        policy=policy,
+        notes=notes,
+    )

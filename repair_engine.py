@@ -7,8 +7,8 @@ import numpy as np
 from PIL import Image, ImageOps, PngImagePlugin
 
 from file_actions import build_repaired_output_path
-from models import AnalysisResult, RepairRecord, RepairSelection
-from repair_planner import suggest_methods_for_result
+from models import AnalysisResult, RepairPlan, RepairRecord, RepairSelection
+from repair_planner import build_repair_plan
 from repair_ops import (
     add_green,
     add_magenta,
@@ -155,6 +155,18 @@ def _candidate_metrics(
     subject_only_mask = masks["subject_only"]
     background_mask = masks["background"]
     highlight_mask = masks["highlight"]
+
+    if not np.any(subject_mask > 0.02):
+        subject_mask = np.zeros_like(luma, dtype=np.float32)
+        y0 = luma.shape[0] // 5
+        y1 = luma.shape[0] * 4 // 5
+        x0 = luma.shape[1] // 5
+        x1 = luma.shape[1] * 4 // 5
+        subject_mask[y0:y1, x0:x1] = 1.0
+        subject_only_mask = subject_mask.copy()
+        background_mask = np.clip(1.0 - subject_mask, 0.0, 1.0)
+        if not np.any(highlight_mask > 0.02):
+            highlight_mask = background_mask.copy()
 
     subject_luma = _weighted_mean(luma, subject_mask)
     background_luma = _weighted_mean(luma, background_mask)
@@ -356,6 +368,7 @@ def _build_skipped_record(
     source_path: Path,
     *,
     method_ids: list[str],
+    op_strengths: dict[str, float] | None = None,
     reason: str,
     notes: list[str] | None = None,
     perf_timings: dict[str, float] | None = None,
@@ -365,6 +378,7 @@ def _build_skipped_record(
         source_path=source_path,
         output_path=source_path,
         method_ids=method_ids,
+        op_strengths=dict(op_strengths or {}),
         warnings=[],
         policy_notes=list(notes or []),
         saved_output=False,
@@ -381,42 +395,44 @@ def apply_method(
     result: AnalysisResult | None = None,
     *,
     strength_scale: float = 1.0,
+    op_strengths: dict[str, float] | None = None,
     original_image: Image.Image | None = None,
     perf_timings: dict[str, float] | None = None,
 ) -> Image.Image:
     started_at = time.perf_counter()
+    effective_strength = max(0.05, min(1.0, strength_scale * (op_strengths.get(method_id, 1.0) if op_strengths else 1.0)))
     if method_id == "auto_tone":
-        fixed = auto_tone(image, strength_scale)
+        fixed = auto_tone(image, effective_strength)
     elif method_id == "recover_highlights":
-        fixed = recover_highlights(image, result, strength_scale)
+        fixed = recover_highlights(image, result, effective_strength)
     elif method_id == "lift_shadows":
-        fixed = lift_shadows(image, result, strength_scale)
+        fixed = lift_shadows(image, result, effective_strength)
     elif method_id == "boost_contrast":
-        fixed = boost_contrast(image, result, strength_scale)
+        fixed = boost_contrast(image, result, effective_strength)
     elif method_id == "boost_vibrance":
-        fixed = boost_vibrance(image, result, strength_scale)
+        fixed = boost_vibrance(image, result, effective_strength)
     elif method_id == "reduce_saturation":
-        fixed = reduce_saturation(image, result, strength_scale)
+        fixed = reduce_saturation(image, result, effective_strength)
     elif method_id == "boost_clarity":
-        fixed = boost_clarity(image, result, strength_scale)
+        fixed = boost_clarity(image, result, effective_strength)
     elif method_id == "reduce_noise":
-        fixed = reduce_noise(image, result, strength_scale)
+        fixed = reduce_noise(image, result, effective_strength)
     elif method_id == "cool_down":
-        fixed = cool_down(image, result, strength_scale)
+        fixed = cool_down(image, result, effective_strength)
     elif method_id == "warm_up":
-        fixed = warm_up(image, result, strength_scale)
+        fixed = warm_up(image, result, effective_strength)
     elif method_id == "add_magenta":
-        fixed = add_magenta(image, result, strength_scale)
+        fixed = add_magenta(image, result, effective_strength)
     elif method_id == "add_green":
-        fixed = add_green(image, result, strength_scale)
+        fixed = add_green(image, result, effective_strength)
     elif method_id == "portrait_local_face_enhance":
-        fixed = portrait_local_face_enhance(image, result, strength_scale)
+        fixed = portrait_local_face_enhance(image, result, effective_strength)
     elif method_id == "portrait_subject_midcontrast":
-        fixed = portrait_subject_midcontrast(image, result, strength_scale)
+        fixed = portrait_subject_midcontrast(image, result, effective_strength)
     elif method_id == "portrait_dark_clothing_detail":
-        fixed = portrait_dark_clothing_detail(image, result, strength_scale)
+        fixed = portrait_dark_clothing_detail(image, result, effective_strength)
     elif method_id == "protect_high_key_background":
-        fixed = protect_high_key_background(image, result, strength_scale, original_image=original_image)
+        fixed = protect_high_key_background(image, result, effective_strength, original_image=original_image)
     else:
         fixed = image
     if perf_timings is not None:
@@ -430,6 +446,7 @@ def apply_methods(
     result: AnalysisResult | None = None,
     *,
     strength_scale: float = 1.0,
+    op_strengths: dict[str, float] | None = None,
     original_image: Image.Image | None = None,
     perf_timings: dict[str, float] | None = None,
 ) -> Image.Image:
@@ -440,16 +457,11 @@ def apply_methods(
             method_id,
             result,
             strength_scale=strength_scale,
+            op_strengths=op_strengths,
             original_image=original_image or image,
             perf_timings=perf_timings,
         )
     return fixed
-
-
-def resolve_method_ids(result: AnalysisResult | None, selection: RepairSelection) -> list[str]:
-    if selection.mode in {"adaptive", "auto"}:
-        return suggest_methods_for_result(result)
-    return selection.selected_method_ids
 
 
 def _portrait_cleanup_skip_reason(result: AnalysisResult | None) -> str | None:
@@ -458,6 +470,18 @@ def _portrait_cleanup_skip_reason(result: AnalysisResult | None) -> str | None:
     for candidate in result.cleanup_candidates:
         if candidate.reason_code == "portrait_out_of_focus" and candidate.confidence >= 0.58:
             return "检测到人像主体严重虚焦，建议加入“不适合保留”候选列表，不建议自动修复。"
+    return None
+
+
+def _scene_auto_skip_reason(result: AnalysisResult | None) -> str | None:
+    if result is None:
+        return None
+    if result.exposure_type == "high_contrast_window_scene":
+        return "检测到高反差窗景/室内外反差场景，不建议自动整体提亮，已跳过。"
+    if result.exposure_type == "silhouette_scene":
+        return "检测到剪影/逆光氛围场景，不建议自动整体提亮，已跳过。"
+    if result.exposure_type == "low_key_scene":
+        return "检测到低调氛围场景，不建议按普通欠曝自动修复，已跳过。"
     return None
 
 
@@ -488,14 +512,14 @@ def _summarize_perf_notes(perf_timings: dict[str, float], result: AnalysisResult
 
 def _select_portrait_candidate(
     image: Image.Image,
-    method_ids: list[str],
+    plan: RepairPlan,
     result: AnalysisResult,
     perf_timings: dict[str, float],
 ) -> tuple[Image.Image | None, float | None, list[str], list[str]]:
     original_metrics = _candidate_metrics(image, result, perf_timings)
     policy_notes = [
         f"检测到 {result.portrait_scene_type}。",
-        f"当前修复策略：{result.portrait_repair_policy}。",
+        f"当前修复策略：{result.portrait_repair_policy} / plan={plan.policy}。",
     ]
     if result.validated_face_count >= 2:
         policy_notes.append(f"检测到 {result.validated_face_count} 张有效人脸，候选评分采用最差人脸保护。")
@@ -506,13 +530,14 @@ def _select_portrait_candidate(
     best_warnings: list[str] = []
     rejected: list[str] = []
 
-    for strength in (0.15, 0.25):
+    for strength in (0.85, 1.0):
         started_at = time.perf_counter()
         candidate = apply_methods(
             image,
-            method_ids,
+            plan.method_ids,
             result,
             strength_scale=strength,
+            op_strengths=plan.op_strengths,
             original_image=image,
             perf_timings=perf_timings,
         )
@@ -522,7 +547,7 @@ def _select_portrait_candidate(
         score, notes = _evaluate_candidate(original_metrics, candidate_metrics, result)
         safe_high_key_candidate = (
             result.portrait_scene_type == "high_key_portrait"
-            and strength <= 0.15
+            and strength <= 0.90
             and float(candidate_metrics["background_highlight_luma"]) >= float(original_metrics["background_highlight_luma"]) - 0.02
             and float(candidate_metrics["skin_redness"]) <= float(original_metrics["skin_redness"]) + 0.010
             and float(candidate_metrics["exposed_skin_redness"]) <= float(original_metrics["exposed_skin_redness"]) + 0.010
@@ -541,10 +566,10 @@ def _select_portrait_candidate(
         else:
             reason = "、".join(notes) if notes else ("局部增强收益不足" if result.portrait_scene_type == "high_key_portrait" else "未优于原图")
             prefix = "候选被降级" if best_image is not None else "候选已回退"
-            rejected.append(f"{prefix}：strength={strength:.2f} | {reason}")
+            rejected.append(f"{prefix}：scale={strength:.2f} | {reason}")
             if (
                 best_image is None
-                and strength <= 0.15
+                and strength <= 0.90
                 and result.portrait_scene_type == "dark_background_portrait"
                 and not result.issues
             ):
@@ -566,6 +591,70 @@ def _select_portrait_candidate(
         policy_notes.append("多人像场景已启用分脸统计和最差人脸保护。")
     policy_notes.extend(rejected)
     return best_image, best_strength, best_warnings, policy_notes
+
+
+def _select_scene_candidate(
+    image: Image.Image,
+    plan: RepairPlan,
+    result: AnalysisResult | None,
+    perf_timings: dict[str, float],
+) -> tuple[Image.Image | None, float | None, list[str], list[str]]:
+    original_metrics = _candidate_metrics(image, result, perf_timings)
+    policy_notes = list(plan.notes)
+    policy_notes.append(f"repair_policy={plan.policy}")
+    best_image: Image.Image | None = None
+    best_scale: float | None = None
+    best_score = 0.03
+    best_warnings: list[str] = []
+    rejected: list[str] = []
+
+    for scale in (0.78, 1.0):
+        started_at = time.perf_counter()
+        candidate = apply_methods(
+            image,
+            plan.method_ids,
+            result,
+            strength_scale=scale,
+            op_strengths=plan.op_strengths,
+            original_image=image,
+            perf_timings=perf_timings,
+        )
+        _add_timing(perf_timings, "candidate_generation", started_at)
+        candidate_metrics = _candidate_metrics(candidate, result, perf_timings)
+        score, notes = _evaluate_candidate(original_metrics, candidate_metrics, result)
+
+        if result is not None and result.exposure_type in {"high_contrast_window_scene", "silhouette_scene", "low_key_scene"}:
+            if float(candidate_metrics["background_luma"]) > float(original_metrics["background_luma"]) + 0.08:
+                score -= 0.80
+                notes.append("暗部氛围被明显抬亮")
+        if result is not None and result.highlight_recovery_type == "unrecoverable_highlights":
+            if float(candidate_metrics["background_highlight_luma"]) < float(original_metrics["background_highlight_luma"]) - 0.035:
+                score -= 0.95
+                notes.append("不可恢复高光被压灰")
+        if result is not None and result.color_type == "natural_vivid":
+            if float(candidate_metrics["global_saturation"]) < float(original_metrics["global_saturation"]) - 0.03:
+                score -= 0.55
+                notes.append("自然高饱和被削弱")
+        if result is not None and result.color_type == "muted_problem":
+            if float(candidate_metrics["global_saturation"]) > float(original_metrics["global_saturation"]) + 0.10:
+                score -= 0.45
+                notes.append("饱和度提升过猛")
+
+        if score > best_score:
+            best_score = score
+            best_image = candidate
+            best_scale = scale
+            best_warnings = _assess_repair_safety(image, candidate, result)
+        else:
+            rejected.append(f"候选已回退：scale={scale:.2f} | {'、'.join(notes) if notes else '未优于原图'}")
+
+    if best_image is None:
+        policy_notes.extend(rejected)
+        policy_notes.append("单图候选评分未优于原图，已回退为 no-op。")
+        return None, None, [], policy_notes
+
+    policy_notes.extend(rejected)
+    return best_image, best_scale, best_warnings, policy_notes
 
 
 def _build_jpeg_exif(exif_bytes: bytes | None, _filename: str) -> bytes | None:
@@ -597,16 +686,18 @@ def repair_image_file(
     perf_timings: dict[str, float] = {}
     repair_started_at = time.perf_counter()
     cleanup_skip_reason = _portrait_cleanup_skip_reason(result)
+    scene_skip_reason = _scene_auto_skip_reason(result) if selection.mode in {"adaptive", "auto"} else None
 
     started_at = time.perf_counter()
-    method_ids = resolve_method_ids(result, selection)
+    plan = build_repair_plan(result, selection)
     _add_timing(perf_timings, "planner", started_at)
-    if not method_ids:
+    if not plan.method_ids:
         perf_notes = _summarize_perf_notes(perf_timings, result)
         if selection.mode == "manual":
             return _build_skipped_record(
                 source_path,
                 method_ids=[],
+                op_strengths={},
                 reason="未选择任何修复方法，已跳过。",
                 perf_timings=perf_timings,
                 perf_notes=perf_notes,
@@ -614,11 +705,13 @@ def repair_image_file(
         return _build_skipped_record(
             source_path,
             method_ids=[],
-            reason=cleanup_skip_reason or "当前分析结果不建议自动修复，已跳过。",
+            op_strengths={},
+            reason=cleanup_skip_reason or scene_skip_reason or "当前分析结果不建议自动修复，已跳过。",
             notes=(
                 ["当前图片已进入“不适合保留”候选列表。"]
                 if cleanup_skip_reason
-                else ["自动推荐阶段未找到比原图更稳妥的修复策略。"] if result is not None and result.portrait_likely else []
+                else [scene_skip_reason] if scene_skip_reason
+                else ["自动推荐阶段未找到比原图更稳妥的修复策略。"] if result is not None else []
             ),
             perf_timings=perf_timings,
             perf_notes=perf_notes,
@@ -642,6 +735,7 @@ def repair_image_file(
             source_path=source_path,
             output_path=source_path,
             method_ids=[],
+            op_strengths={},
             warnings=[],
             policy_notes=["当前图片已进入“不适合保留”候选列表。"],
             saved_output=False,
@@ -650,16 +744,33 @@ def repair_image_file(
             perf_timings=perf_timings,
             perf_notes=perf_notes,
         )
+    if scene_skip_reason and selection.mode in {"adaptive", "auto"} and not plan.method_ids:
+        _add_timing(perf_timings, "repair_total", repair_started_at)
+        perf_notes = _summarize_perf_notes(perf_timings, result)
+        return RepairRecord(
+            source_path=source_path,
+            output_path=source_path,
+            method_ids=[],
+            op_strengths={},
+            warnings=[],
+            policy_notes=plan.notes + [scene_skip_reason],
+            saved_output=False,
+            skipped_reason=scene_skip_reason,
+            applied_strength=None,
+            perf_timings=perf_timings,
+            perf_notes=perf_notes,
+        )
 
     if result is not None and result.portrait_likely:
-        fixed, applied_strength, warnings, policy_notes = _select_portrait_candidate(image, method_ids, result, perf_timings)
+        fixed, applied_strength, warnings, policy_notes = _select_portrait_candidate(image, plan, result, perf_timings)
         if fixed is None:
             _add_timing(perf_timings, "repair_total", repair_started_at)
             perf_notes = _summarize_perf_notes(perf_timings, result)
             return RepairRecord(
                 source_path=source_path,
                 output_path=source_path,
-                method_ids=[],
+                method_ids=plan.method_ids,
+                op_strengths=plan.op_strengths,
                 warnings=[],
                 policy_notes=policy_notes,
                 saved_output=False,
@@ -669,15 +780,23 @@ def repair_image_file(
                 perf_notes=perf_notes,
             )
     else:
-        fixed = apply_methods(
-            image,
-            method_ids,
-            result,
-            strength_scale=1.0,
-            original_image=image,
-            perf_timings=perf_timings,
-        )
-        warnings = _assess_repair_safety(image, fixed, result)
+        fixed, applied_strength, warnings, policy_notes = _select_scene_candidate(image, plan, result, perf_timings)
+        if fixed is None:
+            _add_timing(perf_timings, "repair_total", repair_started_at)
+            perf_notes = _summarize_perf_notes(perf_timings, result)
+            return RepairRecord(
+                source_path=source_path,
+                output_path=source_path,
+                method_ids=plan.method_ids,
+                op_strengths=plan.op_strengths,
+                warnings=[],
+                policy_notes=policy_notes,
+                saved_output=False,
+                skipped_reason=scene_skip_reason or "当前候选未优于原图，已回退为 no-op。",
+                applied_strength=None,
+                perf_timings=perf_timings,
+                perf_notes=perf_notes,
+            )
 
     output_path = build_repaired_output_path(
         source_path,
@@ -712,7 +831,8 @@ def repair_image_file(
     return RepairRecord(
         source_path=source_path,
         output_path=output_path,
-        method_ids=method_ids,
+        method_ids=plan.method_ids,
+        op_strengths=plan.op_strengths,
         warnings=warnings,
         policy_notes=policy_notes,
         saved_output=True,

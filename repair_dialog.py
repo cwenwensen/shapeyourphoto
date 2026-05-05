@@ -66,7 +66,7 @@ class RepairDialog(tk.Toplevel):
         ttk.Label(content, text="修复策略", font=("Microsoft YaHei UI", 11, "bold")).pack(anchor="w")
         ttk.Label(
             content,
-            text="自动模式会按每张图片的检测结果套用推荐方法；手动模式会统一使用你勾选的方法。",
+            text="自动模式会按每张图片的检测结果生成独立 repair plan；手动模式会沿用你勾选的方法，但仍会按单图风险自动限幅，避免副作用。",
             wraplength=640,
         ).pack(anchor="w", pady=(4, 10))
 

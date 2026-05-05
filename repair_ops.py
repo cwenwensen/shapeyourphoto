@@ -275,10 +275,15 @@ def recover_highlights(image: Image.Image, result: AnalysisResult | None = None,
     threshold = 0.72
     if result is not None and result.portrait_likely and result.portrait_scene_type in {"high_key_portrait", "backlit_portrait"}:
         threshold = 0.82
-    mask = np.clip((luma - threshold) / max(0.10, 1.0 - threshold), 0.0, 1.0)[..., None]
+    if result is not None and result.highlight_recovery_type == "unrecoverable_highlights":
+        threshold = max(threshold, 0.86)
+    mask = np.clip((luma - threshold) / max(0.10, 1.0 - threshold), 0.0, 1.0)
     strength = 0.08 + min(1.0, strength_scale) * 0.10
-    arr = arr - mask * strength
-    arr = np.clip(arr, 0.0, 1.0)
+    if result is not None and result.highlight_recovery_type == "unrecoverable_highlights":
+        strength = min(strength, 0.045)
+    target_luma = np.clip(luma - mask * strength, 0.0, 1.0)
+    ratio = np.divide(target_luma, np.maximum(luma, 1e-5), out=np.ones_like(luma), where=luma > 1e-5)
+    arr = np.clip(arr * ratio[:, :, None], 0.0, 1.0)
     return from_array(arr)
 
 
@@ -296,8 +301,11 @@ def lift_shadows(image: Image.Image, result: AnalysisResult | None, strength_sca
         result is not None and result.portrait_exposure_status == "subject_normal"
     )
     dark_background_portrait = portrait_subject_ok and _has_tag(result, "dark_background")
+    scene_guard = result is not None and result.exposure_type in {"high_contrast_window_scene", "silhouette_scene", "low_key_scene"}
     if portrait_subject_ok:
         severity = min(severity, 0.36)
+    if scene_guard:
+        severity = min(severity, 0.12)
 
     severity *= 0.72 + min(1.0, strength_scale) * 0.55
     gamma = max(0.64, 0.84 - severity * 0.12)
@@ -318,6 +326,9 @@ def lift_shadows(image: Image.Image, result: AnalysisResult | None, strength_sca
     if dark_background_portrait:
         preserve_dark = np.clip((0.20 - luma) / 0.20, 0.0, 1.0)[..., None] * 0.24
         result_arr = result_arr * (1.0 - preserve_dark) + arr * preserve_dark
+    if scene_guard:
+        atmosphere_guard = np.clip((0.28 - luma) / 0.28, 0.0, 1.0)[..., None] * 0.34
+        result_arr = result_arr * (1.0 - atmosphere_guard) + arr * atmosphere_guard
 
     highlight_guard = np.clip((luma - 0.70) / 0.30, 0.0, 1.0)[..., None]
     result_arr = result_arr * (1.0 - highlight_guard * (0.06 + (0.04 if portrait_subject_ok else 0.0)))
@@ -400,16 +411,25 @@ def boost_vibrance(image: Image.Image, result: AnalysisResult | None = None, str
         skin_mask *= np.clip(subject_mask * 1.15, 0.0, 1.0)
 
     warm_hue_mask = (((hue <= 0.10) | (hue >= 0.93)) & (sat >= 0.08)).astype(np.float32)
+    sky_mask = (((hue >= 0.52) & (hue <= 0.70)) & (sat >= 0.08) & (luma >= 0.38)).astype(np.float32)
+    neutral_guard = ((sat <= 0.10) & (luma >= 0.18) & (luma <= 0.92)).astype(np.float32)
+    wood_mask = (((hue >= 0.05) & (hue <= 0.14)) & (sat >= 0.10) & (luma >= 0.18) & (luma <= 0.74)).astype(np.float32)
     low_sat_weight = np.power(np.clip((0.44 - sat) / 0.44, 0.0, 1.0), 1.35)
     highlight_guard = 1.0 - np.clip((luma - 0.72) / 0.20, 0.0, 1.0) * 0.72
     skin_guard = 1.0 - skin_mask * 0.78
     warm_guard = 1.0 - warm_hue_mask * 0.32
+    scene_guard = 1.0 - sky_mask * 0.58 - neutral_guard * 0.38 - wood_mask * 0.24
+    scene_guard = np.clip(scene_guard, 0.28, 1.0)
 
     base_strength = (0.05 + score * 0.12) * (0.75 + min(1.0, strength_scale) * 0.40)
     if result is not None and result.portrait_likely:
         base_strength = min(base_strength, 0.12)
+    if result is not None and result.color_type == "restrained_natural":
+        base_strength = min(base_strength, 0.08)
+    if result is not None and result.color_type == "natural_vivid":
+        base_strength = min(base_strength, 0.06)
 
-    boost = base_strength * low_sat_weight * highlight_guard * skin_guard * warm_guard
+    boost = base_strength * low_sat_weight * highlight_guard * skin_guard * warm_guard * scene_guard
     if result is not None and result.portrait_likely:
         non_skin_subject = np.clip(subject_mask * (1.0 - skin_mask), 0.0, 1.0)
         boost *= 1.0 + non_skin_subject * 0.16
@@ -439,10 +459,14 @@ def reduce_saturation(image: Image.Image, result: AnalysisResult | None = None, 
     extreme = np.clip((saturation - 0.84) / 0.12, 0.0, 1.0)
     brightness_weight = 0.30 + 0.70 * np.clip((luma - 0.18) / 0.36, 0.0, 1.0)
     green_dominant = (arr[:, :, 1] > arr[:, :, 0] * 1.08) & (arr[:, :, 1] > arr[:, :, 2] * 1.08)
+    sky_mask = (((hue_map(arr) >= 0.52) & (hue_map(arr) <= 0.70)) & (saturation >= 0.10) & (luma >= 0.38)).astype(np.float32)
     foliage_guard = green_dominant.astype(np.float32) * np.clip((0.55 - luma) / 0.35, 0.0, 1.0) * 0.45
 
     strength = (0.06 + score * 0.15) * (0.70 + min(1.0, strength_scale) * 0.45)
+    if result is not None and result.color_type == "natural_vivid":
+        strength = min(strength, 0.09)
     weight = np.clip(focus * brightness_weight * (1.0 + extreme * 0.75) * (1.0 - foliage_guard), 0.0, 1.0)
+    weight *= (1.0 - sky_mask * 0.32)
 
     gray = luma[:, :, None]
     blended = arr * (1.0 - strength * weight[:, :, None]) + gray * (strength * weight[:, :, None])

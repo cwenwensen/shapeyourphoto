@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import ctypes
 import shutil
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
 from analyzer import is_supported_image
+
+
+_OUTPUT_PATH_LOCK = threading.Lock()
 
 
 @dataclass
@@ -153,15 +157,23 @@ def build_repaired_output_path(
 ) -> Path:
     if overwrite_original:
         return source_path
-    base_path = Path(base_folder)
-    repair_root = base_path / output_folder_name
-    try:
-        relative = source_path.relative_to(base_path)
-    except ValueError:
-        relative = Path(source_path.name)
+    with _OUTPUT_PATH_LOCK:
+        base_path = Path(base_folder)
+        repair_root = base_path / output_folder_name
+        try:
+            relative = source_path.relative_to(base_path)
+        except ValueError:
+            relative = Path(source_path.name)
 
-    output_dir = repair_root / relative.parent
-    output_dir.mkdir(parents=True, exist_ok=True)
-    suffix = filename_suffix or "_fixed"
-    output_name = f"{source_path.stem}{suffix}{source_path.suffix}"
-    return output_dir / output_name
+        output_dir = repair_root / relative.parent
+        output_dir.mkdir(parents=True, exist_ok=True)
+        suffix = filename_suffix or "_fixed"
+        candidate = output_dir / f"{source_path.stem}{suffix}{source_path.suffix}"
+        if not candidate.exists():
+            return candidate
+        index = 1
+        while True:
+            numbered = output_dir / f"{source_path.stem}{suffix}_{index}{source_path.suffix}"
+            if not numbered.exists():
+                return numbered
+            index += 1

@@ -39,6 +39,9 @@ class FaceCandidate:
     detector_score: float = 0.0
     confidence: float = 0.0
     accepted: bool = False
+    classification: str = "unknown"
+    is_real_face: bool = False
+    is_frontal: bool = False
     rejection_reasons: list[str] = field(default_factory=list)
 
 
@@ -67,6 +70,7 @@ class AnalysisResult:
     raw_face_candidates: list[tuple[int, int, int, int]] = field(default_factory=list)
     validated_face_boxes: list[tuple[int, int, int, int]] = field(default_factory=list)
     validated_face_count: int = 0
+    rejected_face_count: int = 0
     face_confidence: float = 0.0
     face_confidences: list[float] = field(default_factory=list)
     face_candidates: list[FaceCandidate] = field(default_factory=list)
@@ -77,7 +81,9 @@ class AnalysisResult:
     background_region: tuple[int, int, int, int] | None = None
     highlight_region: tuple[int, int, int, int] | None = None
     portrait_likely: bool = False
+    portrait_type: str = "non_portrait"
     portrait_scene_type: str = "non_portrait"
+    scene_type: str = "generic_scene"
     face_luma_median: float | None = None
     face_luma_mean: float | None = None
     face_saturation_mean: float | None = None
@@ -92,10 +98,13 @@ class AnalysisResult:
     subject_exposure_status: str = "unknown"
     background_exposure_status: str = "unknown"
     portrait_exposure_status: str = "unknown"
+    exposure_type: str = "normal"
+    highlight_recovery_type: str = "not_needed"
     portrait_focus_score: float = 0.0
     highlight_clipping_ratio: float = 0.0
     subject_background_separation: float = 0.0
     portrait_repair_policy: str = "standard"
+    color_type: str = "balanced"
     exposure_warning_reason: str = ""
     diagnostic_tags: list[str] = field(default_factory=list)
     diagnostic_notes: list[str] = field(default_factory=list)
@@ -123,10 +132,20 @@ class RepairSelection:
 
 
 @dataclass
+class RepairPlan:
+    mode: str
+    method_ids: list[str]
+    op_strengths: dict[str, float] = field(default_factory=dict)
+    policy: str = "standard"
+    notes: list[str] = field(default_factory=list)
+
+
+@dataclass
 class RepairRecord:
     source_path: Path
     output_path: Path
     method_ids: list[str]
+    op_strengths: dict[str, float] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     policy_notes: list[str] = field(default_factory=list)
     saved_output: bool = True

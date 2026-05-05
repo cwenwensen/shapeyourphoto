@@ -136,6 +136,8 @@
 - 旧版本记录不应删除
 ## 1.1.3 Maintenance Addendum
 
+以下内容保留为 1.1.3 的历史基线说明；如与 1.1.4 行为冲突，以后续 1.1.4 附录和 `docs/updates/1.1.4.md` 为准。
+
 ### `analyzer.py`
 
 - 现同时输出 `raw_face_candidates`、`validated_face_boxes`、`face_candidates` 和 `cleanup_candidates`。
@@ -149,3 +151,43 @@
 ### `file_actions.py`
 
 - 清理动作统一走安全出口：优先系统回收站，失败时回退到 `_cleanup_candidates` 隔离目录。
+## 1.1.4 Maintenance Addendum
+
+### 分析包结构
+
+- `analyzer.py`
+  - 保留对外兼容的 `analyze_image()` 与 `is_supported_image()` 入口。
+  - 新逻辑已转发到 `analysis/` 包，避免旧调用链失效。
+- `analysis/core.py`
+  - 主分析流程。
+  - 负责基础统计、场景分类、问题生成、指标组装和 `AnalysisResult` 回填。
+- `analysis/portrait.py`
+  - 负责人脸候选生成、真实人脸验证、背身/侧背身/画作脸识别，以及 portrait-aware 区域构建。
+- `analysis/discard.py`
+  - 负责通用 cleanup candidate 生成，不再把“建议删除”耦合在人像虚焦逻辑中。
+- `analysis/common.py`
+  - 存放共享的统计、掩膜、性能计时和文案兜底工具。
+
+### 修复计划与执行
+
+- `repair_planner.py`
+  - 现在会按单图生成 `RepairPlan`，包含 `method_ids`、`op_strengths`、`policy` 与 `notes`。
+  - 手动模式也允许按图限幅，避免一刀切强修。
+- `repair_engine.py`
+  - 负责单图候选生成、评分、回退、元数据保留与保存输出。
+  - 场景图和人像图现在分别走不同的候选选择逻辑。
+- `repair_ops.py`
+  - `recover_highlights()` 对不可恢复高光更保守，避免天空/白墙压灰。
+  - `lift_shadows()` 对窗景、剪影、低调氛围强限幅。
+  - `boost_vibrance()` 与 `reduce_saturation()` 会按 `color_type` 做保护。
+
+### UI 与批量结果
+
+- `ui_app.py`
+  - 主缩略图列表与 cleanup 候选列表都支持多选。
+  - 批量分析、批量修复、Console 刷新与进度回调都经过主线程调度。
+  - 主菜单新增“不适合保留候选”复开入口。
+- `repair_completion_dialog.py`
+  - 负责可滚动的批量修复完成详情，不再把长文本塞入普通 `messagebox`。
+- `cleanup_review_dialog.py`
+  - 负责本轮 cleanup candidate 的独立复核窗口，默认不勾选任何图片。

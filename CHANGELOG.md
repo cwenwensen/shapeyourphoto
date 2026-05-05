@@ -1,5 +1,17 @@
 # 更新历史
 
+## 1.1.4 - 2026-05-05
+
+- 分析器已模块化为 `analysis/` 包，按核心编排、人像验证、清理候选与公共工具拆分，`analyzer.py` 保留原兼容入口。
+- 人像识别升级为 `raw_face_candidates` 与 `validated_face_boxes` 双层结构，可区分真实正面人脸、背身/侧背身、画作/海报中的脸与纹理误检；低置信度候选不再进入 portrait policy、discard candidate 和多人像评分。
+- `AnalysisResult` 新增 `scene_type`、`portrait_type`、`exposure_type`、`highlight_recovery_type`、`color_type`、`rejected_face_count` 等字段，并输出更完整的诊断说明与拒绝理由。
+- “不适合保留”机制升级为通用 cleanup candidate：本轮接入真实正面人像严重虚焦、严重全图糊片与极端不可恢复曝光问题；支持主菜单再次打开、状态刷新、从候选定位回主缩略图与安全清理。
+- 自动修复改为单图单策略、单图单力度：每张图先生成独立 `RepairPlan`，再做候选评分、风险限制、回退与 no-op 决策；同批图片不再共用固定算法链和统一强度。
+- 高反差窗景、剪影与低调氛围场景默认不再按普通欠曝强修；不可恢复天空/白墙高光改为保亮度优先，避免统一压灰。
+- 色彩修复从更激进的全局饱和度调整改为更保守的 scene-aware vibrance，并增加对天空、肤色、木色、灰墙、白墙和自然高饱和场景的保护与回退。
+- 批量分析与批量修复接入受控线程池，目录扫描、分析、修复和日志刷新都避免阻塞 Tk 主线程；输出路径生成增加锁保护，降低并发写入冲突。
+- 主缩略图列表与 cleanup 候选列表均支持多选；批量修复完成提示改为可滚动自定义对话框，完整显示跳过、no-op、回退与失败原因。
+
 ## 1.1.3 - 2026-05-05
 
 - 新增 portrait-aware 区域分析，为 AnalysisResult 增加 face/subject/background/highlight 区域、场景类型、曝光状态和修复策略字段。

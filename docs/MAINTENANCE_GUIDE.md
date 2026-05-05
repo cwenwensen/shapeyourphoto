@@ -87,3 +87,30 @@
 - 功能变化后，应同步更新 `docs/`
 - 版本变化后，应同步更新 [CHANGELOG.md](/E:/aitools/shapeyourphoto/CHANGELOG.md) 和 [app_metadata.py](/E:/aitools/shapeyourphoto/app_metadata.py)
 - 不要留下临时 handover 垃圾文档
+## 1.1.4 Maintenance Addendum
+
+### 分析器维护边界
+
+- `analyzer.py` 现已变成兼容薄封装；新增分析逻辑优先落到 `analysis/` 包，而不是把大段代码重新堆回单文件。
+- 人像逻辑的维护边界现在明确区分：
+  - raw face candidates：允许偏宽松，便于排查误检来源
+  - validated real faces：只有它们能进入真人 portrait policy、多人像评分与真人虚焦判断
+- 任何新的“建议删除 / 不适合保留”规则，都应优先接到 `analysis/discard.py`，再由 UI 与文件操作层消费。
+
+### 并发与 Tk 线程规则
+
+- 目录扫描、分析、修复和 Console 刷新都可能来自后台线程。
+- 维护时必须继续遵守：
+  - Tk 控件更新回主线程
+  - 后台线程不直接写 Treeview、Text、Label、Progressbar
+  - 输出路径生成与文件保存需要考虑并发冲突
+- 当前输出路径生成已加锁；如果未来增加更多并行写入点，不要绕开这层保护。
+
+### 回归优先级
+
+- 1.1.4 之后的高优先级回归集包括：
+  - 背身人物不得误入真实正面人像虚焦删除
+  - 画作/海报中的脸不得触发真人虚焦建议删除
+  - 高反差窗景、剪影、低调氛围不得被当成普通欠曝强修
+  - 不可恢复天空/白墙高光不得被统一压灰
+  - 自然高饱和场景不得被误判为异常过饱和

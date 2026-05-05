@@ -46,6 +46,7 @@ setup_deps.bat
 
 - 正式维护文档目录： [docs/README.md](/E:/aitools/shapeyourphoto/docs/README.md)
 - 文档保留规则： [docs/PRESERVATION_RULES.md](/E:/aitools/shapeyourphoto/docs/PRESERVATION_RULES.md)
+- 1.1.4 起，分析主逻辑已迁移到 [analysis/core.py](/E:/aitools/shapeyourphoto/analysis/core.py) 和 [analysis/portrait.py](/E:/aitools/shapeyourphoto/analysis/portrait.py)；[analyzer.py](/E:/aitools/shapeyourphoto/analyzer.py) 仅保留兼容入口。
 
 后续接手时，请优先阅读 `docs/`，并保留该目录及其正式文档。
 
@@ -93,18 +94,23 @@ python -m pip install pillow numpy
 
 ## 主要文件
 
-- [app.py](/E:/aitools/codexAuto_photosAnalyzer/app.py)
-- [ui_app.py](/E:/aitools/codexAuto_photosAnalyzer/ui_app.py)
-- [analyzer.py](/E:/aitools/codexAuto_photosAnalyzer/analyzer.py)
-- [repair_engine.py](/E:/aitools/codexAuto_photosAnalyzer/repair_engine.py)
-- [repair_ops.py](/E:/aitools/codexAuto_photosAnalyzer/repair_ops.py)
-- [repair_dialog.py](/E:/aitools/codexAuto_photosAnalyzer/repair_dialog.py)
-- [progress_dialog.py](/E:/aitools/codexAuto_photosAnalyzer/progress_dialog.py)
-- [drag_drop.py](/E:/aitools/codexAuto_photosAnalyzer/drag_drop.py)
-- [metadata_utils.py](/E:/aitools/codexAuto_photosAnalyzer/metadata_utils.py)
-- [app_console.py](/E:/aitools/codexAuto_photosAnalyzer/app_console.py)
-- [watermark_signature.py](/E:/aitools/codexAuto_photosAnalyzer/watermark_signature.py)
-- [MODULES.md](/E:/aitools/codexAuto_photosAnalyzer/MODULES.md)
-- [CHANGELOG.md](/E:/aitools/codexAuto_photosAnalyzer/CHANGELOG.md)
+- [app.py](/E:/aitools/shapeyourphoto/app.py)
+- [ui_app.py](/E:/aitools/shapeyourphoto/ui_app.py)
+- [analyzer.py](/E:/aitools/shapeyourphoto/analyzer.py)
+- [analysis/core.py](/E:/aitools/shapeyourphoto/analysis/core.py)
+- [analysis/portrait.py](/E:/aitools/shapeyourphoto/analysis/portrait.py)
+- [repair_planner.py](/E:/aitools/shapeyourphoto/repair_planner.py)
+- [repair_engine.py](/E:/aitools/shapeyourphoto/repair_engine.py)
+- [repair_ops.py](/E:/aitools/shapeyourphoto/repair_ops.py)
+- [repair_dialog.py](/E:/aitools/shapeyourphoto/repair_dialog.py)
+- [repair_completion_dialog.py](/E:/aitools/shapeyourphoto/repair_completion_dialog.py)
+- [cleanup_review_dialog.py](/E:/aitools/shapeyourphoto/cleanup_review_dialog.py)
+- [progress_dialog.py](/E:/aitools/shapeyourphoto/progress_dialog.py)
+- [drag_drop.py](/E:/aitools/shapeyourphoto/drag_drop.py)
+- [metadata_utils.py](/E:/aitools/shapeyourphoto/metadata_utils.py)
+- [app_console.py](/E:/aitools/shapeyourphoto/app_console.py)
+- [watermark_signature.py](/E:/aitools/shapeyourphoto/watermark_signature.py)
+- [MODULES.md](/E:/aitools/shapeyourphoto/MODULES.md)
+- [CHANGELOG.md](/E:/aitools/shapeyourphoto/CHANGELOG.md)
 
 Copyright (c) 2026 Francis Zhang & Helloalp. All rights reserved. No permission is granted to use, copy, modify, or distribute this project without explicit written permission.

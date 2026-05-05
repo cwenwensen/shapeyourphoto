@@ -99,6 +99,8 @@
 - `1.1.3` 更重视“不要把人像误修坏”，因此所有局部增强和候选强度都偏保守。
 ## 1.1.3 Maintenance Addendum: Face Validation And Cleanup Candidates
 
+以下 1.1.3 附录保留为第一次引入 portrait-aware 与 cleanup candidate 的历史记录；如与 1.1.4 的 validated real face 分层策略不一致，以 1.1.4 附录为准。
+
 - 人脸检测现在明确分为 `raw_face_candidates` 与 `validated_face_boxes` 两层。
 - `raw_face_candidates` 可以保留偏宽松的候选，但 portrait-aware policy、多人像评分和主体区域估计只消费 `validated_face_boxes`。
 - `AnalysisResult.face_candidates` 会记录每个候选的 box、detector score、final confidence、accepted 状态和 rejection reasons，方便定位椅背文字、绿植纹理、手部、衣物边缘等误识别来源。
@@ -123,3 +125,37 @@
   - `source_issue`
 - analyzer 负责产出候选；UI 负责展示与用户确认；文件操作层负责优先回收、失败时退回项目隔离目录。
 - 当前已接入的高风险候选包括 `portrait_out_of_focus`、`global_out_of_focus`、`severe_overexposed` 和 `severe_underexposed`。
+## 1.1.4 Addendum: Validated Real Face And Scene-Aware Portrait Policy
+
+### 人脸候选分层
+
+- 1.1.4 开始明确区分 `raw_face_candidates`、`validated_face_boxes` 与 `face_candidates`。
+- `face_candidates` 会记录每个候选的 `classification`、`accepted`、`is_real_face`、`is_frontal` 与 `rejection_reasons`。
+
+### 候选分类
+
+- 当前重点分类包括：
+  - `real_frontal_face`
+  - `real_near_frontal_face`
+  - `artwork_face`
+  - `non_frontal_face_candidate`
+  - `back_view_proxy`
+  - `texture_false_positive`
+- 只有真实且正面或近正面的 validated face 才能进入 portrait-aware blur、portrait repair policy 与 discard candidate 的真人虚焦规则。
+
+### portrait_type 解释
+
+- `real_frontal_portrait` / `real_near_frontal_portrait` / `real_multi_portrait`
+  - 可进入真人 portrait policy。
+- `artwork_face_context`
+  - 说明检测到画作、画布、海报或印刷品中的肖像脸。
+  - 不触发真人虚焦删除逻辑。
+- `side_back_view_person` / `back_view_person_context`
+  - 说明检测到背身、侧背身或非正面人物上下文。
+  - 不触发 frontal portrait blur。
+
+### 本轮回归口径
+
+- 背身人物必须只作为 `person/back_view/context` 看待，不能再写成“正面人物脸部严重虚焦，建议删除”。
+- 画作中的人脸必须在分析说明中显式表达“检测到画作/非真实人像，未按真人虚焦处理”。
+- `raw_face_count`、`validated_face_count`、`rejected_face_count` 与拒绝理由应可被 Console、诊断区或后续维护脚本消费。
