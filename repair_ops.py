@@ -480,13 +480,84 @@ def boost_clarity(image: Image.Image, result: AnalysisResult | None = None, stre
     return image.filter(ImageFilter.UnsharpMask(radius=radius, percent=percent, threshold=3))
 
 
+def _edge_strength_map(luma: np.ndarray) -> np.ndarray:
+    grad_y, grad_x = np.gradient(luma)
+    return np.sqrt(grad_x * grad_x + grad_y * grad_y)
+
+
 def reduce_noise(image: Image.Image, result: AnalysisResult | None = None, strength_scale: float = 1.0) -> Image.Image:
-    score = max(_issue_score(result, "high_noise"), _issue_score(result, "underexposed") * 0.8)
-    if strength_scale < 0.5:
-        size = 3
+    scene_profile = getattr(result, "denoise_profile", "generic") if result is not None else "generic"
+    issue_score = max(_issue_score(result, "high_noise"), _issue_score(result, "underexposed") * 0.55)
+    analysis_noise = float(getattr(result, "noise_score", 0.0)) if result is not None else 0.0
+    severity = max(issue_score, min(1.0, analysis_noise / 0.02))
+    if severity <= 0.08:
+        return image
+
+    arr = as_array(image)
+    luma = luma_map(arr)
+    sat = saturation_map(arr)
+    edge_strength = _edge_strength_map(luma)
+    detail_guard = np.clip(edge_strength / 0.055, 0.0, 1.0)
+    flat_region = np.clip((0.050 - edge_strength) / 0.050, 0.0, 1.0)
+    shadow_mask = np.clip((0.58 - luma) / 0.38, 0.0, 1.0)
+    highlight_mask = np.clip((luma - 0.72) / 0.22, 0.0, 1.0)
+    sky_mask = (
+        (hue_map(arr) >= 0.50)
+        & (hue_map(arr) <= 0.70)
+        & (sat <= 0.34)
+        & (luma >= 0.36)
+    ).astype(np.float32)
+
+    masks = build_region_masks(result, image.size) if result is not None else None
+    face_mask = masks["face"] if masks is not None else np.zeros_like(luma, dtype=np.float32)
+    subject_mask = masks["subject"] if masks is not None else np.zeros_like(luma, dtype=np.float32)
+    subject_only_mask = masks["subject_only"] if masks is not None else np.zeros_like(luma, dtype=np.float32)
+    background_mask = masks["background"] if masks is not None else np.clip(1.0 - subject_mask, 0.0, 1.0)
+    skin_mask = skin_like_mask(arr).astype(np.float32)
+    face_skin_mask = np.clip(face_mask * skin_mask, 0.0, 1.0)
+
+    base_radius = 0.55 + severity * 0.95 * (0.75 + min(1.0, strength_scale) * 0.55)
+    strong_radius = base_radius + 0.65
+    soft_blur = as_array(image.filter(ImageFilter.GaussianBlur(radius=base_radius)))
+    strong_blur = as_array(image.filter(ImageFilter.GaussianBlur(radius=strong_radius)))
+    median_size = 3 if severity < 0.72 else 5
+    median_blur = as_array(image.filter(ImageFilter.MedianFilter(size=median_size)))
+
+    strong_mix = np.clip((severity - 0.34) / 0.56, 0.0, 1.0)
+    target = soft_blur * (1.0 - strong_mix) + (strong_blur * 0.65 + median_blur * 0.35) * strong_mix
+
+    weight = flat_region * (0.10 + severity * 0.32) * (0.55 + min(1.0, strength_scale) * 0.70)
+    weight *= 0.70 + shadow_mask * 0.30
+
+    if scene_profile in {"night_high_iso", "indoor_shadow"}:
+        weight *= 0.80 + shadow_mask * 0.65
+        weight += sky_mask * 0.08
+    elif scene_profile == "smooth_sky":
+        weight = np.maximum(weight, sky_mask * (0.14 + severity * 0.24))
+        weight *= 0.86 + background_mask * 0.22
+    elif scene_profile == "portrait_protect":
+        face_guard = np.clip(face_mask * (0.75 + detail_guard * 0.25), 0.0, 1.0)
+        weight *= 1.0 - face_guard * 0.86
+        weight += face_skin_mask * flat_region * shadow_mask * (0.02 + severity * 0.08)
+        weight *= 0.82 + background_mask * 0.20
+    elif scene_profile == "architecture_texture":
+        weight *= 0.42 + shadow_mask * 0.18
+        weight *= 1.0 - detail_guard * 0.92
+        weight *= 1.0 - subject_only_mask * 0.20
     else:
-        size = 3 if score < 0.72 else 5
-    return image.filter(ImageFilter.MedianFilter(size=size))
+        weight *= 0.82 + shadow_mask * 0.26
+
+    if result is not None and result.portrait_likely:
+        weight *= 1.0 - face_mask * detail_guard * 0.52
+    if result is not None and result.scene_type in {"architecture_scene", "architecture_vivid_scene"}:
+        weight *= 1.0 - detail_guard * 0.28
+
+    weight *= 1.0 - highlight_mask * 0.25
+    weight = np.clip(weight, 0.0, 0.60 if scene_profile != "smooth_sky" else 0.72)
+    if float(np.max(weight)) < 0.02:
+        return image
+
+    return from_array(_blend_arrays(arr, target, weight))
 
 
 def portrait_local_face_enhance(

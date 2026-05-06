@@ -17,9 +17,6 @@
 - [ui_app.py](/E:/aitools/shapeyourphoto/ui_app.py)
   主界面控制中心。负责目录读取、列表管理、预览、分析触发、修复触发、统计入口、Console 刷新和右侧四区显示。
 
-- [single_image_window.py](/E:/aitools/shapeyourphoto/single_image_window.py)
-  单图大窗口模式入口。内部仍然复用 `PhotoAnalyzerApp`。
-
 ## 分析链路
 
 - [analyzer.py](/E:/aitools/shapeyourphoto/analyzer.py)
@@ -35,10 +32,10 @@
 ## 修复链路
 
 - [repair_planner.py](/E:/aitools/shapeyourphoto/repair_planner.py)
-  负责把问题标签映射到修复方法推荐。
+  负责把问题标签映射到修复方法推荐，并根据 `denoise_profile`、cleanup candidate 等上下文做单图限幅。
 
 - [repair_ops.py](/E:/aitools/shapeyourphoto/repair_ops.py)
-  具体修复算子层。每个函数尽量只做一种修复动作。当前大部分方法支持根据 `AnalysisResult` 自适应计算强度。
+  具体修复算子层。每个函数尽量只做一种修复动作。当前大部分方法支持根据 `AnalysisResult` 自适应计算强度；`reduce_noise` 已升级为场景化降噪。
 
 - [repair_engine.py](/E:/aitools/shapeyourphoto/repair_engine.py)
   修复执行层。负责：
@@ -47,14 +44,21 @@
   - 生成输出路径
   - 写回 EXIF / DPI / ICC / XMP
   - 写入修改来源信息
+  - cleanup candidate 强制尝试修复、结果分类与附加回退判断
 
 - [repair_dialog.py](/E:/aitools/shapeyourphoto/repair_dialog.py)
-  修复对话框。负责模式选择、方法勾选、输出目录、后缀和覆盖原文件选项。
+  修复对话框。负责模式选择、方法勾选、输出目录、后缀、覆盖原文件，以及“强制修复不值得保留的图片”开关。
 
 ## 文件与列表
 
 - [file_actions.py](/E:/aitools/shapeyourphoto/file_actions.py)
-  目录扫描、带进度扫描、导出清理清单、移动到清理目录、生成修复输出路径。
+  目录扫描、带进度扫描、忽略目录前缀、导出清理清单、移动到清理目录、生成修复输出路径。
+
+- [app_settings.py](/E:/aitools/shapeyourphoto/app_settings.py)
+  扫描忽略目录前缀的持久化设置。
+
+- [scan_dialogs.py](/E:/aitools/shapeyourphoto/scan_dialogs.py)
+  目录扫描四选项与忽略前缀设置对话框。
 
 - [preview_cache.py](/E:/aitools/shapeyourphoto/preview_cache.py)
   左侧缩略图缓存。
@@ -80,6 +84,12 @@
 
 - [drag_drop.py](/E:/aitools/shapeyourphoto/drag_drop.py)
   原生 Windows 文件拖入支持。当前使用 `WM_DROPFILES` 方式，不依赖第三方拖拽库。
+
+## 1.1.4 补充维护说明
+
+- 独立“单图模式”已移除；当前保留的是“选择单张图片加入主列表”能力，而不是独立窗口模式。
+- 扫描入口现在都必须遵守 `_repair*` 前缀跳过规则，并把扫描模式、跳过目录数量和导入图片数量写入摘要。
+- 去噪已经并入统一分析与修复链，后续不要再恢复孤立的“去噪当前”旧入口。
 
 ## 属性、签名与附属模块
 
@@ -146,6 +156,11 @@
 - HDR 相关扩展信息只能保留到底层 Pillow 能完整读写的范围；专有增益图或厂商私有结构不能保证完全无损回写。
 - 可见水印默认关闭；如需启用，应通过 [watermark_signature.py](/E:/aitools/shapeyourphoto/watermark_signature.py) 单独接入。
 ## 1.1.4 Addendum
+- 1.1.4 体验与配置完善补充：
+  - 新增 [settings_dialog.py](/E:/aitools/shapeyourphoto/settings_dialog.py)，作为统一应用设置面板。
+  - 新增 [scan_summary_dialog.py](/E:/aitools/shapeyourphoto/scan_summary_dialog.py)，用于查看按前缀聚合后的跳过目录明细。
+  - [repair_completion_dialog.py](/E:/aitools/shapeyourphoto/repair_completion_dialog.py) 已从纯文本详情升级为带筛选的滚动结果视图。
+  - [app_settings.py](/E:/aitools/shapeyourphoto/app_settings.py) 现已负责默认值、校验、自动创建和损坏回退，不再只是单一前缀存储器。
 
 - 以 `docs/` 为准的正式维护文档已经补充 1.1.4 说明；如果本文件和 `docs/` 有冲突，以 `docs/` 为准。
 - `analyzer.py` 现已成为兼容入口，分析主逻辑迁移到 `analysis/` 包。

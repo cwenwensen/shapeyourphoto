@@ -30,10 +30,6 @@
 - 管理列表、筛选、预览信息、分析、修复、进度、拖拽接入
 - 这是最敏感的主流程文件之一
 
-### [single_image_window.py](/E:/aitools/shapeyourphoto/single_image_window.py)
-
-- 单图模式窗口入口
-
 ### [history_dialog.py](/E:/aitools/shapeyourphoto/history_dialog.py)
 
 - 版本历史窗口
@@ -45,7 +41,13 @@
 ### [repair_dialog.py](/E:/aitools/shapeyourphoto/repair_dialog.py)
 
 - 修复方案选择弹窗
+- 包含“强制修复不值得保留的图片”开关
 - 底部操作按钮可见性很重要
+
+### [scan_dialogs.py](/E:/aitools/shapeyourphoto/scan_dialogs.py)
+
+- 目录扫描四选项对话框
+- 扫描忽略前缀设置对话框
 
 ### [debug_open_dialog.py](/E:/aitools/shapeyourphoto/debug_open_dialog.py)
 
@@ -71,6 +73,7 @@
 
 - 把问题标签映射到修复方法
 - 现已为暗背景和高调背景人像增加局部修复策略与背景保护策略
+- 去噪推荐会结合 `noise_level` 与 `denoise_profile`
 
 ### [repair_ops.py](/E:/aitools/shapeyourphoto/repair_ops.py)
 
@@ -78,21 +81,28 @@
 - 修改这里时要重点关注视觉副作用
 - `lift_shadows` 现包含人像主体与暗背景保护逻辑
 - 新增基于粗 mask 的人像局部增强与高调背景保护能力
+- `reduce_noise` 现为场景化降噪，需同时验证脸部纹理、建筑边缘与平滑背景
 
 ### [repair_engine.py](/E:/aitools/shapeyourphoto/repair_engine.py)
 
 - 执行修复链
 - 负责输出文件、元数据写回、EXIF 方向一致性
 - 人像候选修复、评分、回退，以及修复后安全检查都在这里汇总并写回 `RepairRecord`
+- cleanup candidate 强制尝试修复、结果分类和“仍不适合保存”回退也在这里完成
 
 ## 文件与元数据
 
 ### [file_actions.py](/E:/aitools/shapeyourphoto/file_actions.py)
 
 - 文件夹扫描
+- 扫描模式、忽略前缀与跳过目录统计
 - 清理列表导出
 - 清理候选移动
 - 修复输出路径生成
+
+### [app_settings.py](/E:/aitools/shapeyourphoto/app_settings.py)
+
+- 扫描忽略目录前缀的持久化设置
 
 ### [metadata_utils.py](/E:/aitools/shapeyourphoto/metadata_utils.py)
 
@@ -152,6 +162,18 @@
 
 - 清理动作统一走安全出口：优先系统回收站，失败时回退到 `_cleanup_candidates` 隔离目录。
 ## 1.1.4 Maintenance Addendum
+### Settings and Detail Panel Addendum
+- `app_settings.py`
+  - 现在负责统一的默认值、校验、读写、自动创建和损坏回退。
+  - 当前管理扫描忽略目录前缀、默认扫描模式和修复完成详情默认筛选。
+- `settings_dialog.py`
+  - 统一“应用设置”对话框。
+  - 提供忽略前缀增删、恢复默认、默认扫描模式和修复完成详情默认筛选配置。
+- `scan_summary_dialog.py`
+  - 展示最近一次扫描的聚合摘要和跳过目录滚动明细。
+- `repair_completion_dialog.py`
+  - 已从纯文本详情升级为带筛选的结果窗口。
+  - 支持“已修复 / 已跳过 / 失败 / 强制尝试但未保存 / 强制尝试后保存 / 不适合保留相关 / 候选回退 / no-op”等筛选。
 
 ### 分析包结构
 
@@ -191,3 +213,28 @@
   - 负责可滚动的批量修复完成详情，不再把长文本塞入普通 `messagebox`。
 - `cleanup_review_dialog.py`
   - 负责本轮 cleanup candidate 的独立复核窗口，默认不勾选任何图片。
+## 1.1.4 Similar Images Addendum
+
+### Similar Images Fix
+
+- `similar_detector.py` 现在使用多尺度中心裁切、旋转鲁棒哈希、场景/主体摘要、边缘摘要、文件编号连续性和可靠时间辅助，支持 `high` / `medium` / `low` 三档相似组。
+- `similar_review_dialog.py` 修复相似组列表布局：canvas 列表区域可真正滚动，底部按钮固定，组卡片按内容自然高度显示；筛选支持低置信候选。
+- 检测仍然只输出批次级 `SimilarImageGroup`，不修改单张 `AnalysisResult` 和 cleanup candidate。
+
+### [similar_detector.py](/E:/aitools/shapeyourphoto/similar_detector.py)
+
+- 分析批次完成后的相似图片检测模块。
+- 只读取缩略图级特征：aHash、dHash、颜色/亮度直方图、低分辨率灰度结构、尺寸比例和可靠拍摄时间。
+- 输出批次级 `SimilarImageGroup`，不修改单张 `AnalysisResult`。
+- 100 张以内可直接做轻量特征对比；更大批次通过哈希、尺寸和时间分桶减少候选对。
+
+### [similar_review_dialog.py](/E:/aitools/shapeyourphoto/similar_review_dialog.py)
+
+- 相似组列表窗口和组内对比窗口。
+- 列表窗口支持滚动、筛选、多选和“开始抉择”。
+- 对比窗口按组逐个处理，2-4 张使用网格，更多图片分页显示；删除按钮回调主应用的安全删除逻辑。
+
+### [models.py](/E:/aitools/shapeyourphoto/models.py)
+
+- 新增 `SimilarImageGroup`，用于保存相似组编号、路径列表、相似度、等级、依据和可能连拍标记。
+- 该结构属于分析批次附加结果，不进入单张图片的质量问题或修复策略字段。

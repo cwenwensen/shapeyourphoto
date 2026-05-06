@@ -27,13 +27,17 @@ class RepairDialog(tk.Toplevel):
         self.filename_suffix_var = tk.StringVar(value="_fixed")
         self.use_suffix_var = tk.BooleanVar(value=True)
         self.overwrite_var = tk.BooleanVar(value=False)
-        self.method_vars = {method.method_id: tk.BooleanVar(value=method.method_id in recommended_method_ids) for method in methods}
+        self.force_repair_cleanup_var = tk.BooleanVar(value=False)
+        self.method_vars = {
+            method.method_id: tk.BooleanVar(value=method.method_id in recommended_method_ids)
+            for method in methods
+        }
         self.recommended_method_ids = recommended_method_ids
 
         self.transient(parent.winfo_toplevel())
         self.grab_set()
         self.protocol("WM_DELETE_WINDOW", self._cancel)
-        self.minsize(720, 560)
+        self.minsize(760, 620)
 
         container = ttk.Frame(self, padding=14)
         container.pack(fill="both", expand=True)
@@ -58,7 +62,7 @@ class RepairDialog(tk.Toplevel):
             canvas.configure(scrollregion=canvas.bbox("all"))
 
         def _fit_content(_event=None) -> None:
-            canvas.itemconfigure(window_id, width=max(320, canvas.winfo_width()))
+            canvas.itemconfigure(window_id, width=max(360, canvas.winfo_width()))
 
         content.bind("<Configure>", _sync_scroll)
         canvas.bind("<Configure>", _fit_content)
@@ -66,8 +70,12 @@ class RepairDialog(tk.Toplevel):
         ttk.Label(content, text="修复策略", font=("Microsoft YaHei UI", 11, "bold")).pack(anchor="w")
         ttk.Label(
             content,
-            text="自动模式会按每张图片的检测结果生成独立 repair plan；手动模式会沿用你勾选的方法，但仍会按单图风险自动限幅，避免副作用。",
-            wraplength=640,
+            text=(
+                "自动模式会按每张图片的检测结果生成独立 repair plan；"
+                "手动模式会沿用你勾选的方法，但仍会按单图风险自动限幅，避免副作用。"
+            ),
+            wraplength=660,
+            justify="left",
         ).pack(anchor="w", pady=(4, 10))
 
         if allow_adaptive:
@@ -75,7 +83,25 @@ class RepairDialog(tk.Toplevel):
         ttk.Radiobutton(content, text="统一使用勾选的方法", value="manual", variable=self.mode_var).pack(anchor="w", pady=(0, 10))
 
         recommended_labels = "、".join(get_method_labels(recommended_method_ids)) or "当前没有明确推荐项"
-        ttk.Label(content, text=f"当前推荐：{recommended_labels}", wraplength=640).pack(anchor="w", pady=(0, 10))
+        ttk.Label(content, text=f"当前推荐：{recommended_labels}", wraplength=660, justify="left").pack(anchor="w", pady=(0, 10))
+
+        guard_frame = ttk.LabelFrame(content, text="高风险图片处理", padding=10)
+        guard_frame.pack(fill="x", pady=(0, 12))
+        ttk.Checkbutton(
+            guard_frame,
+            text="强制修复不值得保留的图片",
+            variable=self.force_repair_cleanup_var,
+        ).pack(anchor="w")
+        ttk.Label(
+            guard_frame,
+            text=(
+                "仅表示允许尝试修复 cleanup candidate / discard candidate，"
+                "不代表无条件保存。修复后仍会执行单图评分、安全检查和回退判断，"
+                "不合适时会继续跳过输出。"
+            ),
+            wraplength=650,
+            justify="left",
+        ).pack(anchor="w", pady=(6, 0))
 
         folder_row = ttk.Frame(content)
         folder_row.pack(fill="x", pady=(0, 8))
@@ -102,7 +128,7 @@ class RepairDialog(tk.Toplevel):
             row = ttk.Frame(methods_frame)
             row.pack(fill="x", pady=2)
             ttk.Checkbutton(row, text=method.label, variable=self.method_vars[method.method_id]).pack(side="left")
-            ttk.Label(row, text=method.description, wraplength=480).pack(side="left", padx=(8, 0))
+            ttk.Label(row, text=method.description, wraplength=520, justify="left").pack(side="left", padx=(8, 0))
 
         helper_row = ttk.Frame(content)
         helper_row.pack(fill="x", pady=(10, 0))
@@ -114,7 +140,7 @@ class RepairDialog(tk.Toplevel):
         ttk.Button(action_row, text="取消", command=self._cancel).pack(side="right")
         ttk.Button(action_row, text="开始修复", command=self._confirm).pack(side="right", padx=(0, 8))
 
-        center_window(self, 780, 760)
+        center_window(self, 820, 820)
 
     def _set_recommended(self) -> None:
         for method_id, variable in self.method_vars.items():
@@ -145,6 +171,7 @@ class RepairDialog(tk.Toplevel):
             filename_suffix=filename_suffix,
             use_suffix=use_suffix,
             overwrite_original=self.overwrite_var.get(),
+            force_repair_cleanup_candidates=self.force_repair_cleanup_var.get(),
         )
         self.destroy()
 

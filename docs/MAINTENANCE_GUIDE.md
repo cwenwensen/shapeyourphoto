@@ -105,6 +105,29 @@
   - 后台线程不直接写 Treeview、Text、Label、Progressbar
   - 输出路径生成与文件保存需要考虑并发冲突
 - 当前输出路径生成已加锁；如果未来增加更多并行写入点，不要绕开这层保护。
+- 分析取消依赖“当前分析轮次 + cancel event”双重保护；后台任务在写回结果、进度或完成状态前必须确认轮次仍有效，取消后不得再把旧结果写回 UI。
+
+### 目录扫描维护边界
+
+- 1.1.4 起，目录扫描默认至少忽略 `_repair` 前缀；任何以 `_repair` 开头的目录都必须在根目录与任意子目录层级被整体跳过。
+- 扫描忽略前缀由 [app_settings.py](/E:/aitools/shapeyourphoto/app_settings.py) 持久化，UI 设置入口在主菜单“设置 -> 扫描忽略目录前缀”。
+- 目录扫描模式已分为：
+  - 扫描全部，包含子目录
+  - 只扫描当前目录
+  - 扫描所有子目录
+  - 取消扫描
+- 修改扫描逻辑时，需要同时回归：
+  - 按钮扫描
+  - `分析全部` 触发的补扫
+  - Windows 拖拽文件夹导入
+  - Console / 摘要中的扫描模式、跳过目录数量和导入数量输出
+
+### 统一降噪与 cleanup candidate 修复边界
+
+- 降噪不再是孤立按钮；分析、repair planner、repair engine、完成详情和安全回退必须一起维护。
+- `AnalysisResult.noise_score`、`noise_level`、`denoise_profile`、`denoise_recommended` 是统一降噪链路的正式字段，后续扩展不要再绕开它们。
+- cleanup candidate 默认不进入修复；只有勾选“强制修复不值得保留的图片”后，才允许进入统一修复链，而且仍必须经过评分、安全检查与可保留性判断。
+- 修复完成详情中的 outcome 分类（正常修复、强制尝试修复后保存、强制尝试修复但回退、因仍不适合而跳过）属于正式维护面向用户的解释层，修改时要同步文档与 UI。
 
 ### 回归优先级
 
@@ -114,3 +137,17 @@
   - 高反差窗景、剪影、低调氛围不得被当成普通欠曝强修
   - 不可恢复天空/白墙高光不得被统一压灰
   - 自然高饱和场景不得被误判为异常过饱和
+## 1.1.4 Cleanup Note
+
+- 配置相关维护以 [app_settings.py](/E:/aitools/shapeyourphoto/app_settings.py) 和 [settings_dialog.py](/E:/aitools/shapeyourphoto/settings_dialog.py) 为准，不再新增零散菜单项。
+- 扫描相关维护除扫描逻辑本身外，还需同步 [scan_summary_dialog.py](/E:/aitools/shapeyourphoto/scan_summary_dialog.py) 的聚合摘要与跳过明细展示。
+- 修复完成反馈相关维护以 [repair_completion_dialog.py](/E:/aitools/shapeyourphoto/repair_completion_dialog.py) 为准，避免回退到普通 messagebox 或只保留长文本详情。
+## 1.1.4 Similar Images Maintenance Addendum
+
+- 相似检测阈值维护时需要同时覆盖三类样张：近重复/连拍、横竖与裁切变化明显的同主体同场景、完全不同场景。`DSC_2621.JPG` / `DSC_2622.JPG` / `DSC_2623.JPG` 是中等相似回归样张。
+- 相似组列表窗口的 `canvas` 行必须保持可扩展，底部按钮行不得设置 `weight=1`，否则会复现“半个组被截断但底部大片空白”的问题。
+- 相似图片检测是分析后的附加批次流程，维护时不得把相似组结果写回单张 `AnalysisResult.issues`、`scene_type`、人像字段、修复建议或 cleanup candidate。
+- 后台检测完成后，任何 Tk 控件刷新、弹窗展示、列表更新都必须回到主线程。
+- 相似图删除必须继续走 `safe_cleanup_paths()`；不要在相似图窗口中直接 `unlink()` 或永久删除。
+- 同一张图可同时出现在 cleanup candidate 和 similar group 中，UI 只显示标记，不自动删除。
+- 调整阈值时需要同时验证明显重复/连拍可分组，以及不同场景不会被大量误分组。

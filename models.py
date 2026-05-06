@@ -57,6 +57,17 @@ class CleanupCandidate:
 
 
 @dataclass
+class SimilarImageGroup:
+    group_id: int
+    paths: list[Path]
+    similarity: float
+    level: str
+    reason: str
+    evidence: list[str] = field(default_factory=list)
+    possible_burst: bool = False
+
+
+@dataclass
 class AnalysisResult:
     path: Path
     width: int
@@ -105,6 +116,10 @@ class AnalysisResult:
     subject_background_separation: float = 0.0
     portrait_repair_policy: str = "standard"
     color_type: str = "balanced"
+    noise_score: float = 0.0
+    noise_level: str = "low"
+    denoise_profile: str = "none"
+    denoise_recommended: bool = False
     exposure_warning_reason: str = ""
     diagnostic_tags: list[str] = field(default_factory=list)
     diagnostic_notes: list[str] = field(default_factory=list)
@@ -129,6 +144,7 @@ class RepairSelection:
     filename_suffix: str
     use_suffix: bool = True
     overwrite_original: bool = False
+    force_repair_cleanup_candidates: bool = False
 
 
 @dataclass
@@ -151,6 +167,8 @@ class RepairRecord:
     saved_output: bool = True
     skipped_reason: str = ""
     applied_strength: float | None = None
+    forced_repair: bool = False
+    outcome_category: str = "normal_saved"
     perf_timings: dict[str, float] = field(default_factory=dict)
     perf_notes: list[str] = field(default_factory=list)
 

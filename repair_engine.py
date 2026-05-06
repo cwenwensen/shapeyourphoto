@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 from PIL import Image, ImageOps, PngImagePlugin
@@ -214,6 +215,10 @@ def _candidate_metrics(
     face_redness = [item["redness"] for item in face_items]
     face_hues = [item["hue"] for item in face_items]
     skin_redness = _weighted_mean(redness, skin_mask) or 0.0
+    noise_probe = luma - np.clip((luma + np.roll(luma, 1, 0) + np.roll(luma, -1, 0) + np.roll(luma, 1, 1) + np.roll(luma, -1, 1)) / 5.0, 0.0, 1.0)
+    shadow_noise_mask = np.clip(background_mask * (luma <= 0.55).astype(np.float32), 0.0, 1.0)
+    shadow_noise_region = noise_probe[shadow_noise_mask > 0.1]
+    global_edge_strength = _region_sharpness(luma, np.ones_like(luma, dtype=np.float32))
 
     _add_timing(perf_timings, "candidate_scoring", started_at)
     return {
@@ -227,6 +232,10 @@ def _candidate_metrics(
         "face_local_range": _weighted_percentile(luma, face_mask, 20, 80),
         "subject_midtone_contrast": _weighted_percentile(luma, subject_midtone_mask, 25, 75),
         "face_sharpness": _region_sharpness(luma, face_mask),
+        "subject_sharpness": _region_sharpness(luma, subject_mask),
+        "background_sharpness": _region_sharpness(luma, background_mask),
+        "global_edge_strength": global_edge_strength,
+        "shadow_noise": float(np.std(shadow_noise_region)) if shadow_noise_region.size >= 24 else float(np.std(noise_probe)),
         "dark_clothing_luma": _weighted_mean(luma, dark_clothing_mask) or 0.0,
         "global_saturation": float(np.mean(sat)),
         "skin_redness": skin_redness,
@@ -257,6 +266,15 @@ def _evaluate_candidate(
     if float(candidate_metrics["face_saturation"]) < float(original_metrics["face_saturation"]) - 0.05:
         penalties += 1.0
         notes.append("脸部饱和度下降")
+    if float(candidate_metrics["face_sharpness"]) < float(original_metrics["face_sharpness"]) - 0.0011:
+        penalties += 1.4
+        notes.append("脸部纹理被明显抹平")
+    if float(candidate_metrics["subject_sharpness"]) < float(original_metrics["subject_sharpness"]) - 0.0010:
+        penalties += 1.2
+        notes.append("主体细节下降")
+    if float(candidate_metrics["global_edge_strength"]) < float(original_metrics["global_edge_strength"]) - 0.0008:
+        penalties += 0.7
+        notes.append("整体边缘清晰度下降")
     if float(candidate_metrics["subject_background_separation"]) < float(original_metrics["subject_background_separation"]) - 0.03:
         penalties += 1.1
         notes.append("主体背景分离变差")
@@ -281,6 +299,10 @@ def _evaluate_candidate(
     if float(candidate_metrics["face_luma_spread"]) > float(original_metrics["face_luma_spread"]) + 0.028:
         penalties += 1.0
         notes.append("脸部明暗不均加重")
+    if result is not None and result.scene_type in {"architecture_scene", "architecture_vivid_scene"}:
+        if float(candidate_metrics["background_sharpness"]) < float(original_metrics["background_sharpness"]) - 0.0011:
+            penalties += 1.4
+            notes.append("建筑或文字边缘被抹糊")
 
     original_faces = original_metrics.get("face_items", [])
     candidate_faces = candidate_metrics.get("face_items", [])
@@ -306,6 +328,8 @@ def _evaluate_candidate(
 
     gain = 0.0
     if result is not None:
+        if any(issue.code == "high_noise" for issue in result.issues):
+            gain += max(0.0, float(original_metrics["shadow_noise"]) - float(candidate_metrics["shadow_noise"])) * 42.0
         if result.portrait_scene_type in {"high_key_portrait", "dark_background_portrait"} and result.portrait_exposure_status == "subject_normal":
             gain += max(0.0, float(candidate_metrics["subject_local_range"]) - float(original_metrics["subject_local_range"])) * 7.0
             gain += max(0.0, float(candidate_metrics["face_sharpness"]) - float(original_metrics["face_sharpness"])) * 3.5
@@ -317,6 +341,8 @@ def _evaluate_candidate(
         else:
             gain += max(0.0, float(candidate_metrics["subject_local_range"]) - float(original_metrics["subject_local_range"])) * 4.0
             gain += max(0.0, float(candidate_metrics["face_sharpness"]) - float(original_metrics["face_sharpness"])) * 2.5
+        if result.scene_type in {"architecture_scene", "architecture_vivid_scene"}:
+            gain += max(0.0, float(candidate_metrics["background_sharpness"]) - float(original_metrics["background_sharpness"])) * 2.6
 
         if result.portrait_scene_type == "high_key_portrait":
             if float(candidate_metrics["background_highlight_luma"]) >= float(original_metrics["background_highlight_luma"]) - 0.02:
@@ -361,6 +387,12 @@ def _assess_repair_safety(
         warnings.append("高调背景被明显压暗，白墙或浅色建筑可能开始发灰。")
     if float(fixed_metrics["skin_redness"]) > float(original_metrics["skin_redness"]) + 0.02:
         warnings.append("肤色/裸露皮肤红度增加，建议复核脸部、手臂或膝盖是否变红。")
+    if float(fixed_metrics["face_sharpness"]) < float(original_metrics["face_sharpness"]) - 0.0011:
+        warnings.append("脸部细节下降，降噪或柔化可能已经开始影响真实纹理。")
+    if float(fixed_metrics["subject_sharpness"]) < float(original_metrics["subject_sharpness"]) - 0.0010:
+        warnings.append("主体纹理变软，建议降低降噪或锐化叠加强度。")
+    if result.scene_type in {"architecture_scene", "architecture_vivid_scene"} and float(fixed_metrics["background_sharpness"]) < float(original_metrics["background_sharpness"]) - 0.0011:
+        warnings.append("建筑/纹理边缘变软，当前降噪对结构细节的损伤偏大。")
     return warnings
 
 
@@ -371,6 +403,8 @@ def _build_skipped_record(
     op_strengths: dict[str, float] | None = None,
     reason: str,
     notes: list[str] | None = None,
+    forced_repair: bool = False,
+    outcome_category: str = "normal_skipped",
     perf_timings: dict[str, float] | None = None,
     perf_notes: list[str] | None = None,
 ) -> RepairRecord:
@@ -384,6 +418,8 @@ def _build_skipped_record(
         saved_output=False,
         skipped_reason=reason,
         applied_strength=None,
+        forced_repair=forced_repair,
+        outcome_category=outcome_category,
         perf_timings=dict(perf_timings or {}),
         perf_notes=list(perf_notes or []),
     )
@@ -473,6 +509,54 @@ def _portrait_cleanup_skip_reason(result: AnalysisResult | None) -> str | None:
     return None
 
 
+def _primary_cleanup_candidate(result: AnalysisResult | None):
+    if result is None or not result.cleanup_candidates:
+        return None
+    severity_rank = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+    return sorted(
+        result.cleanup_candidates,
+        key=lambda candidate: (
+            severity_rank.get(candidate.severity.lower(), 0),
+            candidate.confidence,
+        ),
+        reverse=True,
+    )[0]
+
+
+def _forced_output_unsuitable_reason(
+    original: Image.Image,
+    fixed: Image.Image,
+    result: AnalysisResult | None,
+) -> str | None:
+    primary_candidate = _primary_cleanup_candidate(result)
+    if primary_candidate is None or result is None:
+        return None
+
+    perf_timings: dict[str, float] = {}
+    original_metrics = _candidate_metrics(original, result, perf_timings)
+    fixed_metrics = _candidate_metrics(fixed, result, perf_timings)
+
+    if primary_candidate.reason_code == "portrait_out_of_focus":
+        sharp_gain = float(fixed_metrics["face_sharpness"]) - float(original_metrics["face_sharpness"])
+        local_gain = float(fixed_metrics["face_local_range"]) - float(original_metrics["face_local_range"])
+        if sharp_gain < 0.00045 and local_gain < 0.010:
+            return "强制尝试后人像脸部细节仍未恢复到可保留水平，已跳过保存。"
+    if primary_candidate.reason_code == "global_out_of_focus":
+        subject_gain = float(fixed_metrics["subject_sharpness"]) - float(original_metrics["subject_sharpness"])
+        range_gain = float(fixed_metrics["subject_local_range"]) - float(original_metrics["subject_local_range"])
+        if subject_gain < 0.00045 and range_gain < 0.014:
+            return "强制尝试后主体清晰度收益仍不足，继续保存价值不高，已跳过。"
+    if primary_candidate.reason_code == "severe_overexposed":
+        highlight_gain = float(original_metrics["background_highlight_luma"]) - float(fixed_metrics["background_highlight_luma"])
+        if highlight_gain < 0.015 and float(fixed_metrics["subject_local_range"]) <= float(original_metrics["subject_local_range"]) + 0.008:
+            return "强制尝试后高光与主体层次改善不足，仍不适合输出修复图。"
+    if primary_candidate.reason_code == "severe_underexposed":
+        shadow_gain = float(fixed_metrics["subject_local_range"]) - float(original_metrics["subject_local_range"])
+        if shadow_gain < 0.014 and float(fixed_metrics["shadow_noise"]) >= float(original_metrics["shadow_noise"]) - 0.0002:
+            return "强制尝试后暗部层次与噪点控制仍不足，已跳过保存。"
+    return None
+
+
 def _scene_auto_skip_reason(result: AnalysisResult | None) -> str | None:
     if result is None:
         return None
@@ -515,6 +599,8 @@ def _select_portrait_candidate(
     plan: RepairPlan,
     result: AnalysisResult,
     perf_timings: dict[str, float],
+    *,
+    forced_repair: bool = False,
 ) -> tuple[Image.Image | None, float | None, list[str], list[str]]:
     original_metrics = _candidate_metrics(image, result, perf_timings)
     policy_notes = [
@@ -526,7 +612,7 @@ def _select_portrait_candidate(
 
     best_image: Image.Image | None = None
     best_strength: float | None = None
-    best_score = 0.05
+    best_score = -0.04 if forced_repair else 0.05
     best_warnings: list[str] = []
     rejected: list[str] = []
 
@@ -598,13 +684,15 @@ def _select_scene_candidate(
     plan: RepairPlan,
     result: AnalysisResult | None,
     perf_timings: dict[str, float],
+    *,
+    forced_repair: bool = False,
 ) -> tuple[Image.Image | None, float | None, list[str], list[str]]:
     original_metrics = _candidate_metrics(image, result, perf_timings)
     policy_notes = list(plan.notes)
     policy_notes.append(f"repair_policy={plan.policy}")
     best_image: Image.Image | None = None
     best_scale: float | None = None
-    best_score = 0.03
+    best_score = -0.02 if forced_repair else 0.03
     best_warnings: list[str] = []
     rejected: list[str] = []
 
@@ -682,15 +770,29 @@ def repair_image_file(
     result: AnalysisResult | None,
     selection: RepairSelection,
     base_folder: str | Path,
+    progress_callback: Callable[[str], None] | None = None,
 ) -> RepairRecord | None:
     perf_timings: dict[str, float] = {}
     repair_started_at = time.perf_counter()
-    cleanup_skip_reason = _portrait_cleanup_skip_reason(result)
+    primary_cleanup_candidate = _primary_cleanup_candidate(result)
+    cleanup_skip_reason = None
+    if primary_cleanup_candidate is not None:
+        cleanup_skip_reason = _portrait_cleanup_skip_reason(result) or (
+            f"当前图片被标记为“不适合保留”（{primary_cleanup_candidate.reason_code}），"
+            "默认不进入修复；如需尝试，请勾选“强制修复不值得保留的图片”。"
+        )
+    forced_repair = bool(selection.force_repair_cleanup_candidates and primary_cleanup_candidate is not None)
     scene_skip_reason = _scene_auto_skip_reason(result) if selection.mode in {"adaptive", "auto"} else None
 
     started_at = time.perf_counter()
+    if progress_callback is not None:
+        progress_callback("生成修复方案")
     plan = build_repair_plan(result, selection)
     _add_timing(perf_timings, "planner", started_at)
+    if forced_repair:
+        plan.notes.append("forced_cleanup_candidate_repair=true")
+        if primary_cleanup_candidate is not None:
+            plan.notes.append(f"cleanup_reason={primary_cleanup_candidate.reason_code}")
     if not plan.method_ids:
         perf_notes = _summarize_perf_notes(perf_timings, result)
         if selection.mode == "manual":
@@ -713,10 +815,14 @@ def repair_image_file(
                 else [scene_skip_reason] if scene_skip_reason
                 else ["自动推荐阶段未找到比原图更稳妥的修复策略。"] if result is not None else []
             ),
+            forced_repair=forced_repair,
+            outcome_category="forced_skip_unsuitable" if forced_repair else "normal_skipped",
             perf_timings=perf_timings,
             perf_notes=perf_notes,
         )
 
+    if progress_callback is not None:
+        progress_callback("读取图片与元数据")
     with Image.open(source_path) as img:
         exif_bytes = img.info.get("exif")
         dpi = img.info.get("dpi")
@@ -728,7 +834,7 @@ def repair_image_file(
     warnings: list[str] = []
     applied_strength: float | None = None
 
-    if cleanup_skip_reason and selection.mode in {"adaptive", "auto"}:
+    if cleanup_skip_reason and not forced_repair:
         _add_timing(perf_timings, "repair_total", repair_started_at)
         perf_notes = _summarize_perf_notes(perf_timings, result)
         return RepairRecord(
@@ -737,10 +843,15 @@ def repair_image_file(
             method_ids=[],
             op_strengths={},
             warnings=[],
-            policy_notes=["当前图片已进入“不适合保留”候选列表。"],
+            policy_notes=[
+                "当前图片已进入“不适合保留”候选列表。",
+                "默认不会自动或手动进入修复尝试；如需尝试，请重新勾选“强制修复不值得保留的图片”。",
+            ],
             saved_output=False,
             skipped_reason=cleanup_skip_reason,
             applied_strength=None,
+            forced_repair=False,
+            outcome_category="discard_candidate_skipped",
             perf_timings=perf_timings,
             perf_notes=perf_notes,
         )
@@ -757,12 +868,22 @@ def repair_image_file(
             saved_output=False,
             skipped_reason=scene_skip_reason,
             applied_strength=None,
+            forced_repair=forced_repair,
+            outcome_category="normal_skipped",
             perf_timings=perf_timings,
             perf_notes=perf_notes,
         )
 
     if result is not None and result.portrait_likely:
-        fixed, applied_strength, warnings, policy_notes = _select_portrait_candidate(image, plan, result, perf_timings)
+        if progress_callback is not None:
+            progress_callback("处理人像与画面细节")
+        fixed, applied_strength, warnings, policy_notes = _select_portrait_candidate(
+            image,
+            plan,
+            result,
+            perf_timings,
+            forced_repair=forced_repair,
+        )
         if fixed is None:
             _add_timing(perf_timings, "repair_total", repair_started_at)
             perf_notes = _summarize_perf_notes(perf_timings, result)
@@ -772,15 +893,29 @@ def repair_image_file(
                 method_ids=plan.method_ids,
                 op_strengths=plan.op_strengths,
                 warnings=[],
-                policy_notes=policy_notes,
+                policy_notes=policy_notes + (["本次为强制尝试修复，但候选评分未能通过。"] if forced_repair else []),
                 saved_output=False,
-                skipped_reason=cleanup_skip_reason or "不建议自动修复：原图人像主体已较正常。",
+                skipped_reason=(
+                    "强制尝试修复后，候选评分未优于原图，已回退。"
+                    if forced_repair
+                    else cleanup_skip_reason or "不建议自动修复：原图人像主体已较正常。"
+                ),
                 applied_strength=None,
+                forced_repair=forced_repair,
+                outcome_category="forced_rollback" if forced_repair else "normal_skipped",
                 perf_timings=perf_timings,
                 perf_notes=perf_notes,
             )
     else:
-        fixed, applied_strength, warnings, policy_notes = _select_scene_candidate(image, plan, result, perf_timings)
+        if progress_callback is not None:
+            progress_callback("处理曝光、色彩与清晰度")
+        fixed, applied_strength, warnings, policy_notes = _select_scene_candidate(
+            image,
+            plan,
+            result,
+            perf_timings,
+            forced_repair=forced_repair,
+        )
         if fixed is None:
             _add_timing(perf_timings, "repair_total", repair_started_at)
             perf_notes = _summarize_perf_notes(perf_timings, result)
@@ -790,10 +925,37 @@ def repair_image_file(
                 method_ids=plan.method_ids,
                 op_strengths=plan.op_strengths,
                 warnings=[],
-                policy_notes=policy_notes,
+                policy_notes=policy_notes + (["本次为强制尝试修复，但候选评分未能通过。"] if forced_repair else []),
                 saved_output=False,
-                skipped_reason=scene_skip_reason or "当前候选未优于原图，已回退为 no-op。",
+                skipped_reason=(
+                    "强制尝试修复后，候选评分未优于原图，已回退。"
+                    if forced_repair
+                    else scene_skip_reason or "当前候选未优于原图，已回退为 no-op。"
+                ),
                 applied_strength=None,
+                forced_repair=forced_repair,
+                outcome_category="forced_rollback" if forced_repair else "normal_skipped",
+                perf_timings=perf_timings,
+                perf_notes=perf_notes,
+            )
+
+    if forced_repair:
+        unsuitable_reason = _forced_output_unsuitable_reason(image, fixed, result)
+        if unsuitable_reason:
+            _add_timing(perf_timings, "repair_total", repair_started_at)
+            perf_notes = _summarize_perf_notes(perf_timings, result)
+            return RepairRecord(
+                source_path=source_path,
+                output_path=source_path,
+                method_ids=plan.method_ids,
+                op_strengths=plan.op_strengths,
+                warnings=warnings,
+                policy_notes=policy_notes + ["强制尝试后的附加可保留性检查未通过。"],
+                saved_output=False,
+                skipped_reason=unsuitable_reason,
+                applied_strength=None,
+                forced_repair=True,
+                outcome_category="forced_skip_unsuitable",
                 perf_timings=perf_timings,
                 perf_notes=perf_notes,
             )
@@ -807,6 +969,8 @@ def repair_image_file(
     )
 
     started_at = time.perf_counter()
+    if progress_callback is not None:
+        progress_callback("准备保存结果")
     save_kwargs: dict[str, object] = {}
     if dpi:
         save_kwargs["dpi"] = dpi
@@ -823,6 +987,8 @@ def repair_image_file(
     _add_timing(perf_timings, "metadata_preserve", started_at)
 
     started_at = time.perf_counter()
+    if progress_callback is not None:
+        progress_callback("保存结果")
     fixed.save(output_path, **save_kwargs)
     _add_timing(perf_timings, "save_output", started_at)
     _add_timing(perf_timings, "repair_total", repair_started_at)
@@ -838,6 +1004,8 @@ def repair_image_file(
         saved_output=True,
         skipped_reason="",
         applied_strength=applied_strength,
+        forced_repair=forced_repair,
+        outcome_category="forced_saved" if forced_repair else "normal_saved",
         perf_timings=perf_timings,
         perf_notes=perf_notes,
     )

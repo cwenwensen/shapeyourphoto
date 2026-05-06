@@ -3,6 +3,7 @@
 import os
 import queue
 import threading
+import time
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -11,23 +12,45 @@ from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageOps
 
 from analyzer import analyze_image
+from app_settings import (
+    AppSettings,
+    REPAIR_SUMMARY_FILTER_ALL,
+    REPAIR_SUMMARY_FILTER_DISCARD_RELATED,
+    REPAIR_SUMMARY_FILTER_FAILED,
+    REPAIR_SUMMARY_FILTER_FORCED_SAVED,
+    REPAIR_SUMMARY_FILTER_FORCED_UNSAVED,
+    REPAIR_SUMMARY_FILTER_REPAIRED,
+    REPAIR_SUMMARY_FILTER_ROLLBACK_NOOP,
+    REPAIR_SUMMARY_FILTER_SKIPPED,
+    load_app_settings,
+    save_app_settings,
+    scan_mode_label,
+)
 from app_console import AppConsole
 from app_metadata import APP_NAME, APP_VERSION
 from cleanup_review_dialog import CleanupReviewEntry, show_cleanup_review_dialog
 from debug_open_dialog import DebugOpenEntry, show_debug_open_dialog
 from diagnostics_chart import DiagnosticsChart
 from drag_drop import WindowsFileDropTarget
-from file_actions import CleanupOperationResult, export_cleanup_list, safe_cleanup_paths, scan_image_paths, scan_image_paths_with_progress
+from file_actions import ScanResult, export_cleanup_list, safe_cleanup_paths, scan_image_paths_with_progress
 from history_dialog import show_history_dialog
 from metadata_utils import summarize_image_metadata
-from models import AnalysisResult, CleanupCandidate, RepairRecord, RepairSelection
+from models import AnalysisResult, CleanupCandidate, RepairRecord, RepairSelection, SimilarImageGroup
 from preview_cache import ThumbnailCache
 from progress_dialog import TaskProgressController
-from repair_completion_dialog import show_repair_completion_dialog
+from repair_completion_dialog import RepairCompletionEntry, show_repair_completion_dialog
 from repair_dialog import show_repair_dialog
 from repair_engine import repair_image_file
 from repair_planner import get_method_labels, get_repair_methods, suggest_methods_for_result, suggest_methods_for_results
 from result_sorting import sort_paths
+from scan_dialogs import (
+    SCAN_MODE_ALL,
+    show_scan_mode_dialog,
+)
+from scan_summary_dialog import show_scan_summary_dialog
+from settings_dialog import show_app_settings_dialog
+from similar_detector import detect_similar_groups
+from similar_review_dialog import show_similar_group_decision_dialog, show_similar_group_list_dialog
 from stats_dialog import show_stats_dialog
 from stats_store import load_stats, record_analysis, record_repair, save_stats
 
@@ -51,19 +74,18 @@ DEFAULT_ANALYSIS_WORKERS = max(1, min(8, os.cpu_count() or 4))
 DEFAULT_REPAIR_WORKERS = max(1, min(4, max(1, (os.cpu_count() or 4) // 2)))
 
 
+class AnalysisCanceled(Exception):
+    pass
+
+
 class PhotoAnalyzerApp:
-    def __init__(self, root: tk.Misc, single_mode: bool = False) -> None:
+    def __init__(self, root: tk.Misc) -> None:
         self.root = root
-        self.single_mode = single_mode
-        if self.single_mode:
-            self.root.geometry("1880x1120")
-            self.root.minsize(1500, 940)
-        else:
-            self.root.geometry("1700x1020")
-            self.root.minsize(1380, 880)
+        self.root.geometry("1700x1020")
+        self.root.minsize(1380, 880)
 
         self.folder_var = tk.StringVar()
-        self.status_var = tk.StringVar(value="请选择图片目录开始分析。" if not self.single_mode else "请选择单张图片开始分析。")
+        self.status_var = tk.StringVar(value="请选择图片目录开始分析。")
         self.filter_var = tk.StringVar(value="全部")
         self.only_problem_var = tk.BooleanVar(value=True)
         self.debug_open_after_repair_var = tk.BooleanVar(value=False)
@@ -80,6 +102,7 @@ class PhotoAnalyzerApp:
         self.errors: dict[Path, str] = {}
         self.selected_flags: dict[Path, tk.BooleanVar] = {}
         self.cleanup_flags: dict[Path, tk.BooleanVar] = {}
+        self.similar_groups: list[SimilarImageGroup] = []
         self.item_lookup: dict[str, Path] = {}
         self.cleanup_item_lookup: dict[str, Path] = {}
         self.worker_lock = threading.Lock()
@@ -89,6 +112,8 @@ class PhotoAnalyzerApp:
         self.list_menu: tk.Menu | None = None
         self.stats = load_stats()
         self.console = AppConsole()
+        self._settings_warnings: list[str] = []
+        self.settings: AppSettings = load_app_settings(report_warning=self._settings_warnings.append, create_if_missing=True)
         self.drop_target: WindowsFileDropTarget | None = None
         self.sort_column = "name"
         self.sort_reverse = False
@@ -96,6 +121,13 @@ class PhotoAnalyzerApp:
         self._last_scan_update = 0.0
         self._ui_queue: queue.SimpleQueue = queue.SimpleQueue()
         self._last_analysis_targets: list[Path] = []
+        self._analysis_run_id = 0
+        self._analysis_cancel_event: threading.Event | None = None
+        self._analysis_cancel_targets: list[Path] = []
+        self._task_started_at = 0.0
+        self._last_scan_summary: str = ""
+        self._last_scan_results: list[ScanResult] = []
+        self._auto_analyze_after_scan = False
 
         self._configure_style()
         self._build_ui()
@@ -111,6 +143,9 @@ class PhotoAnalyzerApp:
         self._install_drag_drop()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after_idle(self._apply_initial_layout)
+        for warning in self._settings_warnings:
+            self._log_console(warning)
+        self._log_console(f"scan ignore prefixes: {', '.join(self.settings.scan_ignore_prefixes)}")
 
     def _configure_style(self) -> None:
         style = ttk.Style()
@@ -140,7 +175,12 @@ class PhotoAnalyzerApp:
         menu_bar = tk.Menu(self.root)
         review_menu = tk.Menu(menu_bar, tearoff=False)
         review_menu.add_command(label="打开不适合保留候选", command=self.open_cleanup_review_window)
+        review_menu.add_command(label="打开相似图片组", command=self.open_similar_group_window)
+        review_menu.add_command(label="最近扫描摘要", command=self.show_last_scan_summary)
         menu_bar.add_cascade(label="查看", menu=review_menu)
+        settings_menu = tk.Menu(menu_bar, tearoff=False)
+        settings_menu.add_command(label="应用设置", command=self.open_settings_panel)
+        menu_bar.add_cascade(label="设置", menu=settings_menu)
         self.root.configure(menu=menu_bar)
 
         outer = ttk.Frame(self.root, padding=18)
@@ -155,8 +195,6 @@ class PhotoAnalyzerApp:
         header.pack(fill="x")
         ttk.Label(header, text=f"{APP_NAME} v{APP_VERSION}", style="Header.TLabel").pack(anchor="w")
         subtitle = "逐张实时分析、缩略图预览、条图诊断、自动修复与批量清理。"
-        if self.single_mode:
-            subtitle = "单图大窗口模式，提供独立 HUD、预览、指标条图和详细说明。"
         ttk.Label(header, text=subtitle, style="Sub.TLabel").pack(anchor="w", pady=(4, 12))
 
         controls = ttk.Frame(top_shell, style="Panel.TFrame", padding=14)
@@ -170,15 +208,13 @@ class PhotoAnalyzerApp:
         choose_image_button = ttk.Button(controls, text="选择图片", command=self.choose_image)
         scan_button = ttk.Button(
             controls,
-            text="读取目录" if not self.single_mode else "重新载入当前图片",
+            text="读取目录",
             style="Soft.TButton",
-            command=self.scan_folder if not self.single_mode else self.analyze_selected,
+            command=self.scan_folder,
         )
         analyze_all_button = ttk.Button(controls, text="分析全部", style="Accent.TButton", command=self.analyze_all)
         analyze_selected_button = ttk.Button(controls, text="分析选中", command=self.analyze_selected)
-        single_mode_button = ttk.Button(controls, text="单图模式", command=self.open_single_mode)
         repair_current_button = ttk.Button(controls, text="修复当前", command=self.repair_current)
-        denoise_current_button = ttk.Button(controls, text="去噪当前", command=self.denoise_current)
         repair_checked_button = ttk.Button(controls, text="批量修复勾选", command=self.repair_checked)
         stats_button = ttk.Button(controls, text="累计统计", command=self.show_stats)
         history_button = ttk.Button(controls, text="更新历史", command=lambda: show_history_dialog(self.root))
@@ -186,17 +222,14 @@ class PhotoAnalyzerApp:
         cleanup_button = ttk.Button(controls, text="清理勾选项", command=self.cleanup_selected)
 
         button_specs: list[ttk.Button] = []
-        if not self.single_mode:
-            button_specs.append(choose_folder_button)
+        button_specs.append(choose_folder_button)
         button_specs.extend(
             [
                 choose_image_button,
                 scan_button,
                 analyze_all_button,
                 analyze_selected_button,
-                single_mode_button,
                 repair_current_button,
-                denoise_current_button,
                 repair_checked_button,
                 stats_button,
                 history_button,
@@ -237,6 +270,13 @@ class PhotoAnalyzerApp:
         self.progress_bar.pack(fill="x", pady=(2, 6))
         ttk.Label(progress_panel, textvariable=self.progress_text_var, style="PanelTitle.TLabel").pack(anchor="w")
         ttk.Label(progress_panel, textvariable=self.progress_detail_var).pack(anchor="w", pady=(4, 0))
+        self.scan_summary_button = ttk.Button(
+            progress_panel,
+            text="查看最近扫描摘要",
+            command=self.show_last_scan_summary,
+            state="disabled",
+        )
+        self.scan_summary_button.pack(anchor="e", pady=(8, 0))
 
         main = ttk.PanedWindow(body_shell, orient="horizontal")
         main.pack(fill="both", expand=True)
@@ -505,13 +545,21 @@ class PhotoAnalyzerApp:
 
     def _handle_dropped_paths(self, dropped: list[Path]) -> None:
         image_paths: list[Path] = []
+        scan_requests: list[tuple[Path, str]] = []
         for item in dropped:
             if item.is_dir():
-                image_paths.extend(scan_image_paths(item))
+                plan = self._resolve_scan_plan(item)
+                if plan is None:
+                    continue
+                scan_requests.append((item, plan))
             elif item.is_file():
                 image_paths.append(item)
+        if scan_requests:
+            self.folder_var.set(str(scan_requests[0][0]))
+            self._start_directory_scans(scan_requests, initial_paths=image_paths, origin="drag_drop")
+            return
         if not image_paths:
-            self._log_console("drag drop ignored: no supported image")
+            self._log_console("drag drop ignored: no supported image or scan canceled")
             return
         self._merge_paths(image_paths)
         self.folder_var.set(str(dropped[0]))
@@ -530,14 +578,7 @@ class PhotoAnalyzerApp:
 
         self.folder_var.set(str(path))
         self.thumb_cache.clear()
-        if self.single_mode:
-            self.image_paths = [path]
-            self.results.clear()
-            self.errors.clear()
-            self.selected_flags.clear()
-            self.cleanup_flags.clear()
-        else:
-            self._merge_paths([path])
+        self._merge_paths([path])
         self.selected_flags.setdefault(path, tk.BooleanVar(value=False))
         self.selected_flags[path].set(True)
         self.status_var.set(f"已载入图片：{path.name}")
@@ -549,60 +590,38 @@ class PhotoAnalyzerApp:
         self._select_path(path)
         self.show_preview(path)
         self._log_console(f"loaded image: {path}")
-        if self.single_mode:
-            self._run_analysis([path])
 
     def scan_folder(self) -> None:
         if self.is_busy:
+            self._auto_analyze_after_scan = False
             messagebox.showinfo("提示", "当前有任务正在运行，请稍后。")
             return
 
         folder = self.folder_var.get().strip()
         if not folder:
+            self._auto_analyze_after_scan = False
             messagebox.showwarning("提示", "请先选择图片目录。")
             return
 
         root = Path(folder)
         if not root.exists():
+            self._auto_analyze_after_scan = False
             messagebox.showerror("错误", "目录不存在，请重新选择。")
             return
 
-        self._last_scan_update = 0.0
-        self._begin_task(
-            1,
-            "读取目录 0/0",
-            f"正在扫描目录：{root}",
-            show_dialog=True,
-            dialog_title="读取目录中",
-            dialog_header="正在扫描目录文件",
-        )
-        self._log_console(f"scan started: {root}")
-
-        def progress_callback(done: int, total: int, found: int, current: Path | None) -> None:
-            current_label = "准备扫描..."
-            if current is not None:
-                try:
-                    current_label = str(current.relative_to(root))
-                except ValueError:
-                    current_label = current.name
-            self._dispatch_ui(lambda: self._update_scan_progress(done, total, found, current_label))
-
-        def worker() -> None:
-            try:
-                paths = scan_image_paths_with_progress(root, progress_callback)
-            except Exception as exc:
-                self._dispatch_ui(lambda: self._scan_failed(str(exc)))
-                return
-            self._dispatch_ui(lambda: self._scan_finished(paths))
-
-        threading.Thread(target=worker, daemon=True).start()
+        scan_mode = self._resolve_scan_plan(root)
+        if scan_mode is None:
+            self._auto_analyze_after_scan = False
+            self._log_console(f"scan canceled: {root}")
+            return
+        self._start_directory_scans([(root, scan_mode)], origin="button")
 
     def analyze_all(self) -> None:
         if not self.image_paths:
-            if self.single_mode:
-                self.choose_image()
-            else:
-                self.scan_folder()
+            self._auto_analyze_after_scan = True
+            self.scan_folder()
+            return
+        self._auto_analyze_after_scan = False
         if self.image_paths:
             self._run_analysis(self.image_paths)
 
@@ -625,19 +644,6 @@ class PhotoAnalyzerApp:
             messagebox.showinfo("提示", "请先在列表中选中一张图片。")
             return
         self._open_repair_dialog([path], "修复当前图片")
-
-    def denoise_current(self) -> None:
-        path = self._current_path()
-        if path is None:
-            messagebox.showinfo("提示", "请先在列表中选中一张图片。")
-            return
-        selection = RepairSelection(
-            mode="manual",
-            selected_method_ids=["reduce_noise"],
-            output_folder_name="_repaired",
-            filename_suffix="_denoised",
-        )
-        self._run_repair([path], selection)
 
     def repair_checked(self) -> None:
         targets = [path for path in self._selected_tree_paths() if path.exists()]
@@ -669,14 +675,140 @@ class PhotoAnalyzerApp:
             self.sort_reverse = False
         self.refresh_tree()
 
-    def open_single_mode(self) -> None:
-        from single_image_window import open_single_image_window
-
-        current = self._current_path()
-        open_single_image_window(self.root, current)
-
     def show_stats(self) -> None:
         show_stats_dialog(self.root, self.stats)
+
+    def open_settings_panel(self) -> None:
+        settings = show_app_settings_dialog(self.root, self.settings)
+        if settings is None:
+            return
+        try:
+            save_app_settings(settings, report_warning=lambda message: self._log_console(message))
+        except Exception as exc:
+            messagebox.showerror("保存失败", f"应用设置保存失败：\n{exc}")
+            self._log_console(f"settings save failed: {exc}")
+            return
+        self.settings = settings
+        self.status_var.set("应用设置已保存，新的扫描和修复详情窗口会立即使用最新配置。")
+        self._log_console(
+            "settings updated: "
+            f"ignore={','.join(self.settings.scan_ignore_prefixes)} | "
+            f"default_scan={self.settings.default_scan_mode} | "
+            f"repair_summary_filter={self.settings.repair_summary_default_filter}"
+        )
+
+    def show_last_scan_summary(self) -> None:
+        if not self._last_scan_results:
+            messagebox.showinfo("提示", "当前还没有可查看的扫描摘要。")
+            return
+        show_scan_summary_dialog(self.root, self._last_scan_results)
+
+    def _resolve_scan_plan(self, root: Path) -> str | None:
+        has_subdirs = any(child.is_dir() for child in root.iterdir())
+        if not has_subdirs:
+            return SCAN_MODE_ALL
+        if self.settings.default_scan_mode != "ask":
+            return self.settings.default_scan_mode
+        return show_scan_mode_dialog(self.root, root, self.settings.scan_ignore_prefixes)
+
+    def _scan_mode_label(self, mode: str) -> str:
+        return scan_mode_label(mode)
+
+    def _start_directory_scans(
+        self,
+        scan_requests: list[tuple[Path, str]],
+        *,
+        initial_paths: list[Path] | None = None,
+        origin: str,
+    ) -> None:
+        requests = [(root, mode) for root, mode in scan_requests if root.exists()]
+        initial = [path for path in (initial_paths or []) if path.exists()]
+        if not requests and initial:
+            self._merge_paths(initial)
+            self.thumb_cache.clear()
+            self.refresh_tree()
+            self._select_path(initial[0])
+            self._log_console(f"drag drop added: {len(initial)} image(s)")
+            return
+        if not requests:
+            return
+
+        self._last_scan_update = 0.0
+        self._begin_task(
+            1,
+            "读取目录 0/0",
+            f"正在扫描目录：{requests[0][0]}",
+            show_dialog=True,
+            dialog_title="读取目录中",
+            dialog_header="正在扫描目录文件",
+        )
+        for root, mode in requests:
+            self._log_console(
+                f"scan started: root={root} mode={self._scan_mode_label(mode)} ignore={','.join(self.settings.scan_ignore_prefixes)} origin={origin}"
+            )
+
+        def worker() -> None:
+            merged_paths = list(initial)
+            scan_results: list[ScanResult] = []
+            try:
+                for root, mode in requests:
+                    def progress_callback(done: int, total: int, found: int, current: Path | None, scan_root: Path = root, scan_mode: str = mode) -> None:
+                        current_label = "准备扫描..."
+                        if current is not None:
+                            try:
+                                current_label = str(current.relative_to(scan_root))
+                            except ValueError:
+                                current_label = current.name
+                        prefix = f"{scan_root.name} | {self._scan_mode_label(scan_mode)}"
+                        self._dispatch_ui(
+                            lambda d=done, t=total, f=found, label=f"{prefix} | {current_label}": self._update_scan_progress(d, t, f, label)
+                        )
+
+                    scan_result = scan_image_paths_with_progress(
+                        root,
+                        progress_callback,
+                        mode=mode,
+                        ignored_dir_prefixes=self.settings.scan_ignore_prefixes,
+                    )
+                    merged_paths.extend(scan_result.paths)
+                    scan_results.append(scan_result)
+                    self._log_scan_console_summary(scan_result)
+            except Exception as exc:
+                self._dispatch_ui(lambda: self._scan_failed(str(exc)))
+                return
+            self._dispatch_ui(lambda paths=merged_paths, results=scan_results: self._scan_finished(paths, results))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _format_scan_summary(self, scan_result: ScanResult) -> str:
+        summary = scan_result.summary
+        prefix_counts = summary.skipped_prefix_counts
+        prefix_text = "；".join(f"{prefix}：{count} 个" for prefix, count in prefix_counts.items()) if prefix_counts else "无"
+        return (
+            f"[{summary.root.name}] 扫描模式：{self._scan_mode_label(summary.mode)} | "
+            f"跳过目录 {summary.skipped_directory_count} 个 | "
+            f"导入图片 {summary.imported_count} 张 | "
+            f"命中前缀：{prefix_text}"
+        )
+
+    def _log_scan_console_summary(self, scan_result: ScanResult) -> None:
+        summary = scan_result.summary
+        prefix_counts = summary.skipped_prefix_counts
+        if prefix_counts:
+            prefix_text = "；".join(f"{prefix}:{count}" for prefix, count in prefix_counts.items())
+            self._log_console(
+                f"scan skipped summary: root={summary.root} skipped={summary.skipped_directory_count} prefixes={prefix_text}"
+            )
+            for detail in summary.skipped_details[:5]:
+                try:
+                    label = str(detail.path.relative_to(summary.root))
+                except ValueError:
+                    label = detail.path.name
+                self._log_console(f"已跳过目录：{label} | prefix={detail.matched_prefix}")
+            if summary.skipped_directory_count > 5:
+                self._log_console(f"更多跳过目录明细请在“最近扫描摘要”中查看，共 {summary.skipped_directory_count} 个。")
+        else:
+            self._log_console(f"scan skipped summary: root={summary.root} skipped=0")
 
     def _analysis_workers(self, total: int) -> int:
         return max(1, min(DEFAULT_ANALYSIS_WORKERS, total))
@@ -703,6 +835,19 @@ class PhotoAnalyzerApp:
             self.cleanup_flags.pop(path, None)
             self.thumb_cache.evict(path)
         self.image_paths = [path for path in self.image_paths if path.exists()]
+        self._prune_similar_groups()
+
+    def _prune_similar_groups(self) -> None:
+        kept: list[SimilarImageGroup] = []
+        next_id = 1
+        for group in self.similar_groups:
+            group.paths[:] = [path for path in group.paths if path.exists() and path in self.image_paths]
+            if len(group.paths) < 2:
+                continue
+            group.group_id = next_id
+            kept.append(group)
+            next_id += 1
+        self.similar_groups = kept
 
     def _set_controls_enabled(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
@@ -718,7 +863,10 @@ class PhotoAnalyzerApp:
         show_dialog: bool = False,
         dialog_title: str | None = None,
         dialog_header: str | None = None,
+        cancel_callback=None,
+        cancel_text: str = "取消",
     ) -> None:
+        self._task_started_at = time.monotonic()
         self.is_busy = True
         self._set_controls_enabled(False)
         self.progress_controller.begin(
@@ -729,12 +877,22 @@ class PhotoAnalyzerApp:
             show_dialog=show_dialog,
             dialog_title=dialog_title,
             dialog_header=dialog_header,
+            cancel_callback=cancel_callback,
+            cancel_text=cancel_text,
         )
 
     def _finish_task(self, title: str, detail: str) -> None:
         self.is_busy = False
         self._set_controls_enabled(True)
         self.progress_controller.finish(title=title, detail=detail, status=detail, close_dialog=True)
+
+    def _elapsed_task_text(self) -> str:
+        seconds = max(0, int(time.monotonic() - self._task_started_at)) if self._task_started_at else 0
+        minutes, sec = divmod(seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours:
+            return f"耗时 {hours:02d}:{minutes:02d}:{sec:02d}"
+        return f"耗时 {minutes:02d}:{sec:02d}"
 
     def _resolve_base_folder(self) -> str:
         raw = self.folder_var.get().strip()
@@ -761,18 +919,33 @@ class PhotoAnalyzerApp:
             dialog_header="正在扫描目录文件",
         )
 
-    def _scan_finished(self, paths: list[Path]) -> None:
+    def _scan_finished(self, paths: list[Path], scan_results: list[ScanResult]) -> None:
         self._merge_paths(paths)
         self.thumb_cache.clear()
         self.progress_bar.configure(maximum=max(1, len(self.image_paths)))
         self.progress_value.set(0.0)
+        self._last_scan_results = list(scan_results)
+        self.scan_summary_button.configure(state="normal" if self._last_scan_results else "disabled")
+        summary_lines = [self._format_scan_summary(result) for result in scan_results]
+        self._last_scan_summary = "；".join(summary_lines)
+        for line in summary_lines:
+            self._log_console(f"scan summary: {line}")
         self._log_console(f"scan finished: new={len(paths)} total={len(self.image_paths)}")
-        self._finish_task("目录读取完成", f"当前列表共 {len(self.image_paths)} 张图片，本次新读取 {len(paths)} 张。")
+        detail = f"当前列表共 {len(self.image_paths)} 张图片，本次新读取 {len(paths)} 张。"
+        if self._last_scan_summary:
+            detail = f"{detail}\n{self._last_scan_summary}\n可点击“查看最近扫描摘要”查看跳过目录明细。"
+        self._finish_task("目录读取完成", detail)
         self.refresh_tree()
         if self.image_paths:
             self._select_path(self.image_paths[0])
+        if self._auto_analyze_after_scan and self.image_paths:
+            self._auto_analyze_after_scan = False
+            self._run_analysis(self.image_paths)
+        else:
+            self._auto_analyze_after_scan = False
 
     def _scan_failed(self, error: str) -> None:
+        self._auto_analyze_after_scan = False
         self._log_console(f"scan failed: {error}")
         self._finish_task("目录读取失败", error)
         messagebox.showerror("读取失败", f"扫描目录时发生错误：\n{error}")
@@ -785,6 +958,11 @@ class PhotoAnalyzerApp:
         total = len(targets)
         if total == 0:
             return
+        self._analysis_run_id += 1
+        run_id = self._analysis_run_id
+        cancel_event = threading.Event()
+        self._analysis_cancel_event = cancel_event
+        self._analysis_cancel_targets = list(targets)
         self.analysis_phase_progress = {path: 0 for path in targets}
         self._last_analysis_targets = list(targets)
         worker_count = self._analysis_workers(total)
@@ -797,46 +975,118 @@ class PhotoAnalyzerApp:
             show_dialog=True,
             dialog_title="分析图片中",
             dialog_header="正在逐张分析图片",
+            cancel_callback=lambda rid=run_id: self.cancel_analysis(rid),
+            cancel_text="取消分析",
         )
 
         for path in targets:
+            self.results.pop(path, None)
             self.errors.pop(path, None)
+            self.cleanup_flags.pop(path, None)
+        target_set = set(targets)
+        self.similar_groups = [
+            group for group in self.similar_groups if not any(path in target_set for path in group.paths)
+        ]
+        self.refresh_tree()
+        current = self._current_path()
+        if current in targets:
+            self.show_preview(current)
 
         def worker() -> None:
             done = 0
-            with ThreadPoolExecutor(max_workers=worker_count) as pool:
-                futures = {}
+            batch_results: dict[Path, AnalysisResult] = {}
+            pool = ThreadPoolExecutor(max_workers=worker_count)
+            futures = {}
+            try:
                 for path in targets:
-                    futures[
-                        pool.submit(
-                            analyze_image,
-                            path,
-                            lambda step, steps, phase, p=path: self._dispatch_ui(
-                                lambda p=p, step=step, steps=steps, phase=phase: self._update_analysis_phase(
-                                    p, step, steps, phase, total
-                                )
-                            ),
+                    if cancel_event.is_set():
+                        break
+
+                    def progress_callback(step: int, steps: int, phase: str, p: Path = path) -> None:
+                        if cancel_event.is_set():
+                            raise AnalysisCanceled("analysis canceled")
+                        self._dispatch_ui(
+                            lambda p=p, step=step, steps=steps, phase=phase, rid=run_id: self._update_analysis_phase(
+                                p, step, steps, phase, total, rid
+                            )
                         )
-                    ] = path
+
+                    futures[pool.submit(analyze_image, path, progress_callback)] = path
 
                 for future in as_completed(futures):
                     path = futures[future]
+                    if cancel_event.is_set():
+                        break
                     result: AnalysisResult | None = None
                     error: str | None = None
                     try:
                         result = future.result()
+                    except AnalysisCanceled:
+                        cancel_event.set()
+                        break
                     except Exception as exc:
                         error = str(exc)
+                    if result is not None:
+                        batch_results[path] = result
                     done += 1
                     self._dispatch_ui(
-                        lambda p=path, r=result, e=error, d=done, t=total: self._handle_analysis_item_done(
-                            p, r, e, d, t
+                        lambda p=path, r=result, e=error, d=done, t=total, rid=run_id: self._handle_analysis_item_done(
+                            p, r, e, d, t, rid
                         )
                     )
+            finally:
+                if cancel_event.is_set():
+                    for future in futures:
+                        future.cancel()
+                    pool.shutdown(wait=True, cancel_futures=True)
+                    self._log_console(f"analysis worker canceled: run={run_id}")
+                else:
+                    pool.shutdown(wait=True)
 
-            self._dispatch_ui(lambda: self._analysis_finished(total))
+            if not cancel_event.is_set():
+                self._dispatch_ui(lambda rid=run_id, t=total: self._update_similarity_detection_phase(t, rid))
+                similar_groups = detect_similar_groups(
+                    targets,
+                    batch_results,
+                    max_workers=worker_count,
+                )
+                self._dispatch_ui(lambda rid=run_id, groups=similar_groups: self._analysis_finished(total, rid, groups))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def cancel_analysis(self, run_id: int | None = None) -> None:
+        if run_id is not None and run_id != self._analysis_run_id:
+            return
+        canceled_run_id = self._analysis_run_id
+        cancel_event = self._analysis_cancel_event
+        if cancel_event is not None:
+            cancel_event.set()
+        self._analysis_run_id += 1
+        targets = list(self._analysis_cancel_targets or self._last_analysis_targets)
+        for path in targets:
+            self.results.pop(path, None)
+            self.errors.pop(path, None)
+            self.cleanup_flags.pop(path, None)
+            self.analysis_phase_progress[path] = 0
+        target_set = set(targets)
+        self.similar_groups = [
+            group for group in self.similar_groups if not any(path in target_set for path in group.paths)
+        ]
+        self.analysis_phase_progress = {}
+        self._last_analysis_targets = []
+        self._analysis_cancel_targets = []
+        self._analysis_cancel_event = None
+        detail = f"已取消本轮分析，{len(targets)} 张图片保留在列表中，可重新点击“分析全部”。"
+        self._log_console(f"analysis canceled: count={len(targets)} run={canceled_run_id}")
+        self.is_busy = False
+        self._set_controls_enabled(True)
+        self.progress_controller.finish(title="分析已取消", detail=detail, status=detail, close_dialog=True)
+        self.refresh_tree()
+        current = self._current_path()
+        if current is not None:
+            self.show_preview(current)
+        elif targets:
+            self._select_path(targets[0])
 
     def _handle_analysis_item_done(
         self,
@@ -845,7 +1095,10 @@ class PhotoAnalyzerApp:
         error: str | None,
         done: int,
         total: int,
+        run_id: int,
     ) -> None:
+        if run_id != self._analysis_run_id or (self._analysis_cancel_event is not None and self._analysis_cancel_event.is_set()):
+            return
         with self.worker_lock:
             if error:
                 self.errors[path] = error
@@ -893,7 +1146,7 @@ class PhotoAnalyzerApp:
             done=sum(self.analysis_phase_progress.values()),
             total=total * ANALYSIS_PROGRESS_STEPS,
             title=f"分析中 {done}/{total}",
-            detail=f"最近完成：{path.name}",
+            detail=f"已完成第 {done}/{total} 张：{path.name} | 生成建议与诊断信息 | {self._elapsed_task_text()}",
             status=f"分析进度 {done}/{total}，最近完成：{path.name}",
             dialog_title="分析图片中",
             dialog_header="正在逐张分析图片",
@@ -965,7 +1218,23 @@ class PhotoAnalyzerApp:
                         step += 1
                         self._dispatch_ui(lambda s=step, t=total_steps, name=path.name: self._update_progress(s, t, name, "跳过失败项"))
                         continue
-                    futures[pool.submit(repair_image_file, path, self.results.get(path), selection, self._resolve_base_folder())] = path
+                    def repair_progress(phase: str, p: Path = path) -> None:
+                        self._dispatch_ui(
+                            lambda s=step, t=total_steps, name=p.name, phase=phase: self._update_repair_phase(
+                                s, t, name, phase
+                            )
+                        )
+
+                    futures[
+                        pool.submit(
+                            repair_image_file,
+                            path,
+                            self.results.get(path),
+                            selection,
+                            self._resolve_base_folder(),
+                            repair_progress,
+                        )
+                    ] = path
 
                 for future in as_completed(futures):
                     path = futures[future]
@@ -1027,40 +1296,116 @@ class PhotoAnalyzerApp:
         threading.Thread(target=worker, daemon=True).start()
 
     def _update_progress(self, done: int, total: int, filename: str, phase: str) -> None:
+        friendly_phase = self._friendly_repair_phase(phase)
         self.progress_controller.update(
             done=done,
             total=total,
-            title=f"{phase} {done}/{total}",
-            detail=f"最近处理：{filename}",
-            status=f"{phase} {done}/{total}，最近处理：{filename}",
+            title=f"{friendly_phase} {done}/{total}",
+            detail=f"{friendly_phase}：处理第 {done}/{total} 张，当前 {filename} | {self._elapsed_task_text()}",
+            status=f"{friendly_phase} {done}/{total}，当前：{filename}",
             dialog_title="修复图片中",
             dialog_header="正在分析并修复图片",
         )
 
-    def _update_analysis_phase(self, path: Path, step: int, steps: int, phase: str, total_images: int) -> None:
+    def _update_repair_phase(self, done: int, total: int, filename: str, phase: str) -> None:
+        friendly_phase = self._friendly_repair_phase(phase)
+        current_index = min(total, done + 1)
+        self.progress_controller.update(
+            done=done,
+            total=total,
+            title=f"修复中 {done}/{total}",
+            detail=f"{friendly_phase}：处理第 {current_index}/{total} 张，当前 {filename} | {self._elapsed_task_text()}",
+            status=f"{friendly_phase}，当前：{filename}",
+            dialog_title="修复图片中",
+            dialog_header="正在分析并修复图片",
+        )
+
+    def _friendly_analysis_phase(self, phase: str) -> str:
+        if "读取" in phase or "图像" in phase:
+            return "读取图片"
+        if "亮度" in phase or "主体" in phase or "背景" in phase:
+            return "分析曝光与画面结构"
+        if "锐度" in phase or "色彩" in phase or "人像" in phase:
+            return "分析色彩与清晰度"
+        if "问题" in phase or "建议" in phase:
+            return "生成问题与修复建议"
+        if "指标" in phase or "最终" in phase:
+            return "整理诊断结果"
+        return phase
+
+    def _friendly_repair_phase(self, phase: str) -> str:
+        if "修复前分析" in phase:
+            return "读取图片并补充分析"
+        if "跳过失败项" in phase:
+            return "整理不可处理图片"
+        if "生成修复方案" in phase:
+            return "生成修复方案"
+        if "读取图片" in phase or "元数据" in phase:
+            return "读取图片与元数据"
+        if "曝光" in phase or "色彩" in phase or "清晰度" in phase:
+            return "处理曝光、色彩与清晰度"
+        if "人像" in phase:
+            return "处理人像与画面细节"
+        if "准备保存" in phase:
+            return "准备保存结果"
+        if "保存" in phase:
+            return "保存结果"
+        return "生成并保存修复结果" if "修复" in phase else phase
+
+    def _update_analysis_phase(self, path: Path, step: int, steps: int, phase: str, total_images: int, run_id: int) -> None:
+        if run_id != self._analysis_run_id or (self._analysis_cancel_event is not None and self._analysis_cancel_event.is_set()):
+            return
         normalized_step = max(0, min(ANALYSIS_PROGRESS_STEPS, int(round(step * ANALYSIS_PROGRESS_STEPS / max(1, steps)))))
         previous = self.analysis_phase_progress.get(path, 0)
         if normalized_step > previous:
             self.analysis_phase_progress[path] = normalized_step
         aggregate_done = sum(self.analysis_phase_progress.values())
         finished_images = sum(1 for value in self.analysis_phase_progress.values() if value >= ANALYSIS_PROGRESS_STEPS)
-        detail = f"正在分析：{path.name} | {phase} {step}/{steps}"
+        friendly_phase = self._friendly_analysis_phase(phase)
+        detail = f"处理第 {finished_images + 1}/{total_images} 张：{path.name} | {friendly_phase} | {self._elapsed_task_text()}"
         if total_images > 1:
-            detail = f"批量分析 {finished_images}/{total_images} | {path.name} | {phase} {step}/{steps}"
+            detail = f"批量分析 {finished_images}/{total_images} | 第 {min(total_images, finished_images + 1)}/{total_images} 张：{path.name} | {friendly_phase} | {self._elapsed_task_text()}"
         self.progress_controller.update(
             done=aggregate_done,
             total=max(1, total_images * ANALYSIS_PROGRESS_STEPS),
+            title=f"分析中 {finished_images}/{total_images}",
             detail=detail,
             status=detail,
             dialog_title="分析图片中",
             dialog_header="正在逐张分析图片",
         )
 
-    def _analysis_finished(self, total: int) -> None:
+    def _update_similarity_detection_phase(self, total: int, run_id: int) -> None:
+        if run_id != self._analysis_run_id or (self._analysis_cancel_event is not None and self._analysis_cancel_event.is_set()):
+            return
+        self.progress_controller.update(
+            done=total * ANALYSIS_PROGRESS_STEPS,
+            total=max(1, total * ANALYSIS_PROGRESS_STEPS),
+            title="检测相似图片",
+            detail=f"分析已完成，正在使用缩略图哈希和摘要特征检测本轮相似图片组。{self._elapsed_task_text()}",
+            status="正在检测相似图片组",
+            dialog_title="分析图片中",
+            dialog_header="正在逐张分析图片",
+        )
+
+    def _analysis_finished(self, total: int, run_id: int, similar_groups: list[SimilarImageGroup] | None = None) -> None:
+        if run_id != self._analysis_run_id or (self._analysis_cancel_event is not None and self._analysis_cancel_event.is_set()):
+            return
         issue_count = sum(1 for result in self.results.values() if result.issues)
         error_count = len(self.errors)
-        detail = f"分析完成：问题图片 {issue_count} 张，失败 {error_count} 张。"
-        self._log_console(f"analysis finished: count={total} issues={issue_count} errors={error_count}")
+        similar_groups = similar_groups or []
+        target_set = set(self._last_analysis_targets)
+        self.similar_groups = [
+            group for group in self.similar_groups if not any(path in target_set for path in group.paths)
+        ]
+        self.similar_groups.extend(similar_groups)
+        similar_count = len(similar_groups)
+        detail = f"分析完成：问题图片 {issue_count} 张，失败 {error_count} 张，相似组 {similar_count} 组。"
+        self._log_console(f"analysis finished: count={total} issues={issue_count} errors={error_count} similar_groups={similar_count}")
+        for group in similar_groups:
+            self._log_console(
+                f"similar group: #{group.group_id} count={len(group.paths)} score={group.similarity:.2f} | {group.reason}"
+            )
         self.analysis_phase_progress = {}
         self.progress_controller.update(
             done=total * ANALYSIS_PROGRESS_STEPS,
@@ -1072,10 +1417,13 @@ class PhotoAnalyzerApp:
             dialog_header="正在逐张分析图片",
         )
         self._finish_task(f"分析完成 {total}/{total}", detail)
+        self._analysis_cancel_event = None
+        self._analysis_cancel_targets = []
         current = self._current_path()
         if current is not None:
             self.show_preview(current)
         self._maybe_prompt_cleanup_candidates(self._last_analysis_targets)
+        self._maybe_prompt_similar_groups(similar_groups)
         self._last_analysis_targets = []
 
     def _maybe_prompt_cleanup_candidates(self, paths: list[Path]) -> None:
@@ -1116,6 +1464,43 @@ class PhotoAnalyzerApp:
             self._select_cleanup_path(dialog_result.chosen_paths[0])
         if dialog_result.action == "delete" and dialog_result.chosen_paths:
             self.cleanup_selected_candidates()
+
+    def _maybe_prompt_similar_groups(self, groups: list[SimilarImageGroup]) -> None:
+        groups = [group for group in groups if len([path for path in group.paths if path.exists()]) >= 2]
+        if not groups:
+            return
+        self._log_console(f"similar detection summary: groups={len(groups)}")
+        self.open_similar_group_window(groups)
+
+    def open_similar_group_window(self, groups: list[SimilarImageGroup] | None = None) -> None:
+        self._prune_missing_paths()
+        active_groups = groups if groups is not None else self.similar_groups
+        active_groups = [group for group in active_groups if len([path for path in group.paths if path.exists()]) >= 2]
+        if not active_groups:
+            messagebox.showinfo("提示", "当前没有可复核的相似图片组。")
+            return
+        cleanup_paths = set(self._primary_cleanup_candidates())
+        show_similar_group_list_dialog(
+            self.root,
+            active_groups,
+            self.results,
+            cleanup_paths,
+            self._open_similar_decision_window,
+        )
+        self._prune_similar_groups()
+        self.refresh_tree()
+
+    def _open_similar_decision_window(self, groups: list[SimilarImageGroup]) -> None:
+        cleanup_paths = set(self._primary_cleanup_candidates())
+        show_similar_group_decision_dialog(
+            self.root,
+            groups,
+            self.results,
+            cleanup_paths,
+            self._delete_similar_image,
+        )
+        self._prune_similar_groups()
+        self.refresh_tree()
 
     def open_cleanup_review_window(self) -> None:
         self._prune_missing_paths()
@@ -1177,59 +1562,61 @@ class PhotoAnalyzerApp:
 
         self.refresh_tree()
 
+        outcome_counts = {
+            "normal_saved": 0,
+            "forced_saved": 0,
+            "forced_rollback": 0,
+            "forced_skip_unsuitable": 0,
+            "discard_candidate_skipped": 0,
+        }
+        for record in repaired + skipped:
+            outcome_counts[record.outcome_category] = outcome_counts.get(record.outcome_category, 0) + 1
+
         lines = [
             f"已修复 {len(repaired)} 张",
             f"已跳过 {len(skipped)} 张",
             f"失败 {len(failed)} 张",
+            f"强制尝试后保存 {outcome_counts['forced_saved']} 张",
+            f"强制尝试但未保存 {outcome_counts['forced_rollback'] + outcome_counts['forced_skip_unsuitable']} 张",
         ]
         if selection.mode == "manual":
             labels = "、".join(get_method_labels(selection.selected_method_ids)) or "无"
             lines.append(f"统一方法：{labels}")
         else:
             lines.append("修复模式：按检测结果自动推荐")
+        lines.append(
+            "强制修复不值得保留图片："
+            + ("已启用（仅允许尝试，仍会回退或跳过保存）" if selection.force_repair_cleanup_candidates else "未启用")
+        )
 
         if selection.overwrite_original:
             lines.append("输出方式：覆盖原文件")
         else:
             lines.append(f"输出目录：{Path(self._resolve_base_folder()).resolve() / selection.output_folder_name}")
             lines.append(f"文件后缀：{selection.filename_suffix or '(无后缀)'}")
-        detail_lines: list[str] = []
-        if repaired:
-            detail_lines.append("成功记录：")
-            for record in repaired:
-                detail_lines.append(
-                    f"- {record.source_path.name} -> {record.output_path.name} | "
-                    f"ops={','.join(record.method_ids) or 'none'} | "
-                    f"strengths={', '.join(f'{k}:{v:.2f}' for k, v in record.op_strengths.items()) or 'none'}"
-                )
-                for note in record.policy_notes:
-                    detail_lines.append(f"  note: {note}")
-                for warning in record.warnings:
-                    detail_lines.append(f"  warning: {warning}")
-        if skipped:
-            if detail_lines:
-                detail_lines.append("")
-            detail_lines.append("跳过记录：")
-            for record in skipped:
-                reason = record.skipped_reason or "当前方案未生成修复输出。"
-                detail_lines.append(
-                    f"- {record.source_path.name} | reason={reason} | "
-                    f"ops={','.join(record.method_ids) or 'none'} | "
-                    f"strengths={', '.join(f'{k}:{v:.2f}' for k, v in record.op_strengths.items()) or 'none'}"
-                )
-                for note in record.policy_notes:
-                    detail_lines.append(f"  note: {note}")
-        if failed:
-            if detail_lines:
-                detail_lines.append("")
-            detail_lines.append("失败详情：")
-            for path, message in failed:
-                detail_lines.append(f"- {path.name}：{message}")
+        if outcome_counts["normal_saved"]:
+            lines.append(f"正常修复：{outcome_counts['normal_saved']} 张")
+        if outcome_counts["forced_rollback"]:
+            lines.append(f"强制尝试修复但回退：{outcome_counts['forced_rollback']} 张")
+        if outcome_counts["forced_skip_unsuitable"] or outcome_counts["discard_candidate_skipped"]:
+            lines.append(
+                f"因仍不适合而跳过：{outcome_counts['forced_skip_unsuitable'] + outcome_counts['discard_candidate_skipped']} 张"
+            )
+
+        outcome_labels = {
+            "normal_saved": "正常修复",
+            "forced_saved": "强制尝试修复后保存",
+            "forced_rollback": "强制尝试修复但回退",
+            "forced_skip_unsuitable": "因仍不适合而跳过",
+            "discard_candidate_skipped": "默认跳过不值得保留图片",
+            "normal_skipped": "常规跳过",
+        }
         show_repair_completion_dialog(
             self.root,
             title="修复完成",
             summary_lines=lines,
-            detail_lines=detail_lines,
+            entries=self._build_repair_completion_entries(repaired, skipped, failed, outcome_labels),
+            default_filter=self.settings.repair_summary_default_filter or REPAIR_SUMMARY_FILTER_ALL,
         )
 
         if self.debug_open_after_repair_var.get() and repaired:
@@ -1244,6 +1631,105 @@ class PhotoAnalyzerApp:
             chosen = show_debug_open_dialog(self.root, entries)
             if chosen:
                 self._open_debug_pairs(chosen)
+
+    def _ops_text(self, record: RepairRecord) -> str:
+        parts: list[str] = []
+        if record.method_ids:
+            parts.append("ops=" + ",".join(record.method_ids))
+        if record.op_strengths:
+            strength_text = ", ".join(f"{name}:{value:.2f}" for name, value in record.op_strengths.items())
+            parts.append(f"strengths={strength_text}")
+        return " | ".join(parts) if parts else "ops=none"
+
+    def _repair_entry_filter_tags(self, record: RepairRecord, *, saved_output: bool) -> set[str]:
+        tags = {REPAIR_SUMMARY_FILTER_REPAIRED if saved_output else REPAIR_SUMMARY_FILTER_SKIPPED}
+        if record.forced_repair:
+            if saved_output:
+                tags.add(REPAIR_SUMMARY_FILTER_FORCED_SAVED)
+            else:
+                tags.add(REPAIR_SUMMARY_FILTER_FORCED_UNSAVED)
+            tags.add(REPAIR_SUMMARY_FILTER_DISCARD_RELATED)
+        if record.outcome_category == "discard_candidate_skipped":
+            tags.add(REPAIR_SUMMARY_FILTER_DISCARD_RELATED)
+        if record.outcome_category in {"forced_rollback", "normal_skipped"}:
+            reason_text = (record.skipped_reason or "").lower()
+            note_text = " ".join(record.policy_notes).lower()
+            if "no-op" in reason_text or "回退" in record.skipped_reason or "no-op" in note_text or "回退" in note_text:
+                tags.add(REPAIR_SUMMARY_FILTER_ROLLBACK_NOOP)
+        if record.outcome_category == "forced_rollback":
+            tags.add(REPAIR_SUMMARY_FILTER_ROLLBACK_NOOP)
+        return tags
+
+    def _build_repair_detail_lines(self, record: RepairRecord, *, include_output: bool) -> list[str]:
+        lines = [self._ops_text(record)]
+        if include_output:
+            lines.append(f"输出文件：{record.output_path}")
+        if record.skipped_reason:
+            lines.append(f"skip reason：{record.skipped_reason}")
+        if record.applied_strength is not None:
+            lines.append(f"applied strength：{record.applied_strength:.2f}")
+        denoise_strength = record.op_strengths.get("reduce_noise")
+        if denoise_strength is not None:
+            lines.append(f"denoise：{denoise_strength:.2f}")
+        for note in record.policy_notes:
+            lines.append(f"note：{note}")
+        for warning in record.warnings:
+            lines.append(f"warning：{warning}")
+        for note in record.perf_notes:
+            lines.append(f"perf：{note}")
+        return lines
+
+    def _build_repair_completion_entries(
+        self,
+        repaired: list[RepairRecord],
+        skipped: list[RepairRecord],
+        failed: list[tuple[Path, str]],
+        outcome_labels: dict[str, str],
+    ) -> list[RepairCompletionEntry]:
+        entries: list[RepairCompletionEntry] = []
+        for record in repaired:
+            status = outcome_labels.get(record.outcome_category, record.outcome_category)
+            primary_reason = "已生成修复输出。"
+            if record.forced_repair:
+                primary_reason = "强制尝试后通过评分与安全检查，已保存修复结果。"
+            entries.append(
+                RepairCompletionEntry(
+                    file_name=record.source_path.name,
+                    status=status,
+                    primary_reason=primary_reason,
+                    ops_or_skip=self._ops_text(record),
+                    forced=record.forced_repair,
+                    filter_tags=self._repair_entry_filter_tags(record, saved_output=True),
+                    detail_lines=self._build_repair_detail_lines(record, include_output=True),
+                )
+            )
+        for record in skipped:
+            status = outcome_labels.get(record.outcome_category, record.outcome_category)
+            reason = record.skipped_reason or "当前方案未生成修复输出。"
+            entries.append(
+                RepairCompletionEntry(
+                    file_name=record.source_path.name,
+                    status=status,
+                    primary_reason=reason,
+                    ops_or_skip=reason if not record.method_ids else f"{reason} | {self._ops_text(record)}",
+                    forced=record.forced_repair,
+                    filter_tags=self._repair_entry_filter_tags(record, saved_output=False),
+                    detail_lines=self._build_repair_detail_lines(record, include_output=False),
+                )
+            )
+        for path, message in failed:
+            entries.append(
+                RepairCompletionEntry(
+                    file_name=path.name,
+                    status="失败",
+                    primary_reason=message,
+                    ops_or_skip=message,
+                    forced=False,
+                    filter_tags={REPAIR_SUMMARY_FILTER_FAILED},
+                    detail_lines=[f"文件：{path}", f"错误：{message}"],
+                )
+            )
+        return entries
 
     def _open_debug_pairs(self, entries: list[DebugOpenEntry]) -> None:
         missing: list[str] = []
@@ -1364,6 +1850,12 @@ class PhotoAnalyzerApp:
             self.cleanup_delete_button.configure(state="disabled")
             self.cleanup_hint_var.set("当前没有勾选候选，可直接跳过。")
 
+    def _similar_marker_for_path(self, path: Path) -> str:
+        group_ids = [str(group.group_id) for group in self.similar_groups if path in group.paths and len(group.paths) >= 2]
+        if not group_ids:
+            return ""
+        return f"相似组#{'/'.join(group_ids[:2])}"
+
     def refresh_tree(self) -> None:
         self._prune_missing_paths()
         current_path = self._current_path()
@@ -1385,6 +1877,9 @@ class PhotoAnalyzerApp:
                 tags = "正常"
             else:
                 tags = ""
+            similar_marker = self._similar_marker_for_path(path)
+            if similar_marker:
+                tags = f"{tags} | {similar_marker}" if tags else similar_marker
 
             thumb = self.thumb_cache.get_tree_thumbnail(path)
             item_id = self.tree.insert("", "end", text=path.name, image=thumb, values=(checked, status, risk, tags))
@@ -1600,6 +2095,7 @@ class PhotoAnalyzerApp:
         self.selected_flags.pop(path, None)
         self.cleanup_flags.pop(path, None)
         self.thumb_cache.evict(path)
+        self._prune_similar_groups()
         self._log_console(f"removed from list: {path}")
         if refresh:
             self.refresh_tree()
@@ -1701,6 +2197,10 @@ class PhotoAnalyzerApp:
             lines.append(f"scene_type：{result.scene_type}")
             lines.append(f"exposure_type：{result.exposure_type}")
             lines.append(f"color_type：{result.color_type}")
+            lines.append(
+                f"noise：{result.noise_level} ({result.noise_score:.4f}) | "
+                f"denoise_profile={result.denoise_profile} | recommended={'是' if result.denoise_recommended else '否'}"
+            )
             if result.portrait_scene_type:
                 lines.append(f"人像场景：{result.portrait_scene_type}")
             if result.portrait_repair_policy:
@@ -1728,6 +2228,10 @@ class PhotoAnalyzerApp:
                     f"- {primary_cleanup.reason_code} | {primary_cleanup.severity} | {primary_cleanup.confidence:.2f}"
                 )
                 lines.append(f"  原因：{primary_cleanup.reason_text}")
+            similar_marker = self._similar_marker_for_path(path)
+            if similar_marker:
+                lines.append("")
+                lines.append(f"相似图片标记：{similar_marker}。可在“查看 -> 打开相似图片组”中复核。")
             if result.perf_notes:
                 lines.append("性能提示：")
                 for note in result.perf_notes:
@@ -1779,12 +2283,15 @@ class PhotoAnalyzerApp:
             self.hud_methods_var.set("推荐修复：等待分析完成")
             return
         self.hud_risk_var.set(f"风险值 {result.overall_score:.2f}")
+        similar_hint = " | 相似组" if self._similar_marker_for_path(path) else ""
         if result.issues:
             tags = "、".join(issue.label for issue in result.issues[:4])
             methods = "、".join(get_method_labels(suggest_methods_for_result(result))) or "暂无明确推荐"
             face_info = f" | raw/valid/reject {result.raw_face_count}/{result.validated_face_count}/{result.rejected_face_count}" if (result.raw_face_count or result.validated_face_count or result.rejected_face_count) else ""
             cleanup_hint = " | 建议删除候选" if result.cleanup_candidates else ""
-            self.hud_tags_var.set(f"识别结果：{tags}{face_info}{cleanup_hint}")
+            self.hud_tags_var.set(f"识别结果：{tags}{face_info}{cleanup_hint}{similar_hint}")
+            if result.denoise_recommended:
+                methods = f"{methods} | 降噪:{result.denoise_profile}"
             if result.cleanup_candidates:
                 primary_cleanup = sorted(
                     result.cleanup_candidates,
@@ -1798,7 +2305,8 @@ class PhotoAnalyzerApp:
                 self.hud_methods_var.set(f"推荐修复：{methods}")
         else:
             portrait_hint = f" | {result.portrait_scene_type}" if result.portrait_likely and result.portrait_scene_type else ""
-            self.hud_tags_var.set(f"识别结果：未发现明显问题{portrait_hint}")
+            cleanup_hint = " | 建议删除候选" if result.cleanup_candidates else ""
+            self.hud_tags_var.set(f"识别结果：未发现明显问题{portrait_hint}{cleanup_hint}{similar_hint}")
             if result.portrait_rejection_reason:
                 self.hud_methods_var.set(f"推荐修复：未启用人像策略，{result.portrait_rejection_reason}")
             else:
@@ -1823,6 +2331,44 @@ class PhotoAnalyzerApp:
         self.status_var.set(f"已导出清理清单：{output}")
         messagebox.showinfo("完成", f"已导出清理清单：\n{output}")
 
+    def _delete_similar_image(self, path: Path, group: SimilarImageGroup) -> bool:
+        if not path.exists():
+            group.paths[:] = [item for item in group.paths if item != path]
+            self._remove_path_from_list(path, refresh=False)
+            self.refresh_tree()
+            return True
+        result = self.results.get(path)
+        cleanup_marker = "；该图同时是不适合保留候选" if result and result.cleanup_candidates else ""
+        confirm = messagebox.askyesno(
+            "确认删除相似图片",
+            "将优先尝试移入系统回收站；若系统不支持，则移入项目内安全隔离目录 `_cleanup_candidates`。\n\n"
+            f"相似组 {group.group_id}：{path.name}{cleanup_marker}\n\n是否继续？",
+        )
+        if not confirm:
+            return False
+        try:
+            operation = safe_cleanup_paths([path], self._resolve_base_folder())
+        except Exception as exc:
+            self._log_console(f"similar delete failed: {path.name} | {exc}")
+            messagebox.showerror("无法删除", f"未能安全删除 {path.name}：\n{exc}")
+            return False
+        if operation.moved < 1 and path.exists():
+            messagebox.showerror("无法删除", f"未能安全删除 {path.name}：\n{operation.destination_label}")
+            return False
+
+        self._remove_path_from_list(path, refresh=False)
+        self.image_paths = [item for item in self.image_paths if item.exists()]
+        group.paths[:] = [item for item in group.paths if item != path and item.exists()]
+        self._prune_similar_groups()
+        self.refresh_tree()
+        current = self._current_path()
+        if current is None and self.image_paths:
+            self._select_path(self.image_paths[0])
+        detail = f"已安全清理相似图片：{path.name} -> {operation.destination_label}"
+        self._log_console(f"similar image handled: group={group.group_id} mode={operation.mode} moved={operation.moved} destination={operation.destination_label}")
+        self.status_var.set(detail)
+        return True
+
     def cleanup_selected_candidates(self) -> None:
         primary_candidates = self._primary_cleanup_candidates()
         chosen = [path for path, flag in self.cleanup_flags.items() if flag.get() and path in primary_candidates and path.exists()]
@@ -1844,7 +2390,12 @@ class PhotoAnalyzerApp:
         if not confirm:
             return
 
-        operation = safe_cleanup_paths(chosen, self._resolve_base_folder())
+        try:
+            operation = safe_cleanup_paths(chosen, self._resolve_base_folder())
+        except Exception as exc:
+            self._log_console(f"cleanup candidates failed: {exc}")
+            messagebox.showerror("无法删除", f"安全清理失败：\n{exc}")
+            return
         for path in chosen:
             self._remove_path_from_list(path, refresh=False)
 
@@ -1883,7 +2434,12 @@ class PhotoAnalyzerApp:
         if not confirm:
             return
 
-        operation = safe_cleanup_paths(chosen, self._resolve_base_folder())
+        try:
+            operation = safe_cleanup_paths(chosen, self._resolve_base_folder())
+        except Exception as exc:
+            self._log_console(f"cleanup failed: {exc}")
+            messagebox.showerror("无法删除", f"安全清理失败：\n{exc}")
+            return
         for path in chosen:
             self._remove_path_from_list(path, refresh=False)
 

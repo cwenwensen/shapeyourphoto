@@ -64,6 +64,72 @@ def _highlight_texture(gray: np.ndarray, highlight_mask: np.ndarray) -> float:
     return float(np.percentile(values, 90) - np.percentile(values, 10))
 
 
+def _classify_noise_profile(
+    *,
+    noise_score_raw: float,
+    brightness: float,
+    shadow_ratio: float,
+    contrast: float,
+    edge_density_value: float,
+    neutral_ratio: float,
+    blue_ratio: float,
+    portrait_likely: bool,
+    validated_face_boxes: list[tuple[int, int, int, int]],
+    scene_type: str,
+) -> tuple[float, str, str, bool, str, str]:
+    profile = "generic"
+    threshold = 0.0115
+    detail = "当前噪点不明显。"
+    suggestion = "普通图片无需额外降噪，保持原始纹理通常更稳妥。"
+
+    night_like = brightness <= 0.30 and shadow_ratio >= 0.24
+    indoor_shadow = brightness <= 0.44 and shadow_ratio >= 0.32
+    portrait_scene = portrait_likely and bool(validated_face_boxes)
+    smooth_sky = blue_ratio >= 0.14 and edge_density_value <= 0.09 and contrast <= 0.15
+    architecture_texture = scene_type in {"architecture_scene", "architecture_vivid_scene"}
+
+    if portrait_scene:
+        profile = "portrait_protect"
+        threshold = 0.0128 if edge_density_value >= 0.10 else 0.0120
+        detail = "检测到人像场景，降噪需要优先保护脸部纹理与皮肤细节。"
+        suggestion = "仅在颗粒明显时建议温和降噪，并结合脸部清晰度回退检查。"
+    elif architecture_texture:
+        profile = "architecture_texture"
+        threshold = 0.0125
+        detail = "检测到建筑/纹理场景，降噪需要优先保护边缘、文字和重复纹理。"
+        suggestion = "仅建议保守降噪，避免墙面线条、文字和结构细节被抹糊。"
+    elif smooth_sky:
+        profile = "smooth_sky"
+        threshold = 0.0101
+        detail = "检测到低纹理天空或大面积纯净背景，这类区域更容易暴露颗粒噪点。"
+        suggestion = "可对平滑背景做适度降噪，但仍需保留云层和边缘自然过渡。"
+    elif night_like:
+        profile = "night_high_iso"
+        threshold = 0.0094
+        detail = "检测到夜景/高 ISO 风格的暗场画面，阴影噪点更可能影响观感。"
+        suggestion = "建议把降噪纳入修复链，并重点检查暗部颗粒与细节保留平衡。"
+    elif indoor_shadow:
+        profile = "indoor_shadow"
+        threshold = 0.0100
+        detail = "检测到暗部占比较高的室内或阴影场景，提亮后容易放大噪点。"
+        suggestion = "若后续需要提亮阴影，建议同步做温和降噪，避免颗粒感进一步放大。"
+    elif neutral_ratio >= 0.24 and edge_density_value <= 0.08:
+        profile = "smooth_sky"
+        threshold = 0.0106
+        detail = "检测到大面积平滑中性区域，轻微颗粒也可能比较显眼。"
+        suggestion = "可在不伤细节的前提下做轻度降噪。"
+
+    severity = max(0.0, min(1.0, (noise_score_raw - threshold) / max(0.0035, threshold * 0.55)))
+    recommended = severity >= 0.34 and profile != "generic" or severity >= 0.48
+    if severity >= 0.68:
+        level = "high"
+    elif severity >= 0.34:
+        level = "elevated"
+    else:
+        level = "low"
+    return severity, level, profile, recommended, detail, suggestion
+
+
 def _classify_scene(
     *,
     brightness: float,
@@ -577,6 +643,18 @@ def analyze_image(path: str | Path, progress_callback: Callable[[int, int, str],
         portrait_likely=portrait_likely,
         portrait_type=portrait_type,
     )
+    noise_severity, noise_level, denoise_profile, denoise_recommended, noise_detail, noise_suggestion = _classify_noise_profile(
+        noise_score_raw=noise_score_raw,
+        brightness=brightness,
+        shadow_ratio=shadow_ratio,
+        contrast=contrast,
+        edge_density_value=edge_density_value,
+        neutral_ratio=neutral_ratio,
+        blue_ratio=blue_ratio,
+        portrait_likely=portrait_likely,
+        validated_face_boxes=validated_face_boxes,
+        scene_type=scene_type,
+    )
 
     exposure_issues, exposure_type, highlight_recovery_type, exposure_notes = _build_exposure_issues(
         brightness=brightness,
@@ -598,6 +676,18 @@ def analyze_image(path: str | Path, progress_callback: Callable[[int, int, str],
         highlight_texture=highlight_texture,
     )
     issues.extend(exposure_issues)
+    if noise_severity >= 0.38:
+        issues.append(
+            issue(
+                "high_noise",
+                "噪点偏高",
+                noise_severity,
+                f"{noise_detail} 当前噪声指标约 {noise_score_raw:.4f}，推荐降噪策略：{denoise_profile}。",
+                noise_suggestion,
+            )
+        )
+        if denoise_recommended:
+            scene_notes.append(f"检测到适合纳入统一修复链的降噪场景：{denoise_profile}")
 
     texture_ready = scene_detail >= 0.0025 or dyn_range >= 0.20
     blur_score = min(1.0, max(0.0, (0.0012 - sharp_p90) / 0.0012 * 0.8 + (0.00018 - sharp_max) / 0.00018 * 0.2))
@@ -788,6 +878,10 @@ def analyze_image(path: str | Path, progress_callback: Callable[[int, int, str],
         subject_background_separation=float(portrait_data["subject_background_separation"]),
         portrait_repair_policy=str(portrait_data["portrait_repair_policy"]),
         color_type=color_type,
+        noise_score=noise_score_raw,
+        noise_level=noise_level,
+        denoise_profile=denoise_profile,
+        denoise_recommended=denoise_recommended,
         exposure_warning_reason=str(portrait_data["exposure_warning_reason"]),
         diagnostic_tags=diagnostic_tags,
         diagnostic_notes=diagnostic_notes,

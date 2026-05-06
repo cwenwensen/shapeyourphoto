@@ -11,7 +11,7 @@ REPAIR_METHODS = [
     RepairMethod("boost_vibrance", "增强自然饱和度", "适合色彩寡淡但不希望整体过饱和的画面。"),
     RepairMethod("reduce_saturation", "降低饱和度", "压住过强颜色，减少刺眼和失真。"),
     RepairMethod("boost_clarity", "增强清晰度", "用轻量锐化提升主体边缘和微对比。"),
-    RepairMethod("reduce_noise", "轻度降噪", "减少颗粒噪点，适合高 ISO 或暗部拉亮后的图像。"),
+    RepairMethod("reduce_noise", "自适应降噪", "按场景与区域抑制噪点，优先保护人像纹理、建筑边缘和纯净背景。"),
     RepairMethod("cool_down", "降低色温 / 去偏暖", "适合整体偏黄、偏红、偏暖的画面。"),
     RepairMethod("warm_up", "升高色温 / 去偏冷", "适合整体偏蓝、偏青、偏冷的画面。"),
     RepairMethod("add_magenta", "补品红 / 去偏绿", "适合整体发绿的画面。"),
@@ -46,6 +46,7 @@ def suggest_methods_for_result(result: AnalysisResult | None) -> list[str]:
     high_key_portrait = result.portrait_scene_type == "high_key_portrait"
     backlit_portrait = result.portrait_scene_type == "backlit_portrait"
     multi_person_portrait = result.portrait_scene_type == "multi_person_portrait"
+    denoise_needed = bool(result.denoise_recommended or result.noise_level in {"elevated", "high"})
 
     def add(method_id: str) -> None:
         if method_id not in seen and method_id in REPAIR_METHOD_MAP:
@@ -54,6 +55,9 @@ def suggest_methods_for_result(result: AnalysisResult | None) -> list[str]:
 
     if severe_portrait_focus_failure:
         return []
+
+    if denoise_needed and result.denoise_profile in {"night_high_iso", "indoor_shadow", "smooth_sky", "portrait_protect"}:
+        add("reduce_noise")
 
     if portrait_enabled:
         if high_key_portrait:
@@ -88,13 +92,15 @@ def suggest_methods_for_result(result: AnalysisResult | None) -> list[str]:
         elif issue.code == "underexposed":
             if portrait_subject_ok:
                 add("portrait_subject_midcontrast")
+                if denoise_needed:
+                    add("reduce_noise")
                 if dark_background_portrait:
                     add("portrait_dark_clothing_detail")
                 if any(color_issue.code == "color_cast" for color_issue in result.issues):
                     add(next((color_issue.meta.get("method_hint", "cool_down") for color_issue in result.issues if color_issue.code == "color_cast"), "cool_down"))
             else:
                 add("lift_shadows")
-                if issue.score >= 0.55:
+                if issue.score >= 0.55 or denoise_needed:
                     add("reduce_noise")
                 if issue.score >= 0.72:
                     add("boost_contrast")
@@ -129,6 +135,9 @@ def suggest_methods_for_result(result: AnalysisResult | None) -> list[str]:
         elif issue.code == "color_cast":
             add(issue.meta.get("method_hint", "cool_down"))
 
+    if denoise_needed and "reduce_noise" not in seen and result.noise_level == "high":
+        add("reduce_noise")
+
     return ordered
 
 
@@ -161,12 +170,14 @@ def build_repair_plan(result: AnalysisResult | None, selection: RepairSelection)
     blur = max(issue_scores.get("out_of_focus", 0.0), issue_scores.get("portrait_out_of_focus", 0.0))
     high_noise = issue_scores.get("high_noise", 0.0)
     color_cast = issue_scores.get("color_cast", 0.0)
+    noise_score = max(high_noise, float(getattr(result, "noise_score", 0.0)) / 0.02)
 
     window_guard = result.exposure_type in {"high_contrast_window_scene", "silhouette_scene", "low_key_scene"}
     unrecoverable_highlights = result.highlight_recovery_type == "unrecoverable_highlights"
     natural_vivid = result.color_type == "natural_vivid"
     restrained_natural = result.color_type == "restrained_natural"
     portrait_enabled = result.portrait_likely and result.validated_face_count > 0
+    denoise_profile = result.denoise_profile or "none"
 
     op_strengths: dict[str, float] = {}
     notes = [
@@ -174,6 +185,7 @@ def build_repair_plan(result: AnalysisResult | None, selection: RepairSelection)
         f"portrait_type={result.portrait_type}",
         f"exposure_type={result.exposure_type}",
         f"color_type={result.color_type}",
+        f"denoise_profile={denoise_profile}",
     ]
 
     def set_strength(method_id: str, value: float) -> None:
@@ -213,7 +225,22 @@ def build_repair_plan(result: AnalysisResult | None, selection: RepairSelection)
         elif method_id == "boost_clarity":
             value = 0.20 + blur * 0.22
         elif method_id == "reduce_noise":
-            value = 0.20 + max(high_noise, under * 0.7) * 0.18
+            value = 0.12 + max(noise_score, under * 0.42) * 0.22
+            if denoise_profile == "portrait_protect":
+                value = min(max(value, 0.18), 0.30)
+                notes.append("人像降噪：优先保护脸部与皮肤纹理，限制过度磨皮。")
+            elif denoise_profile == "architecture_texture":
+                value = min(value, 0.22)
+                notes.append("建筑/纹理降噪：对强边缘与文字区域保持保守。")
+            elif denoise_profile == "smooth_sky":
+                value = min(0.42, value + 0.06)
+                notes.append("纯净背景降噪：允许对低纹理天空和墙面做更明显抑噪。")
+            elif denoise_profile in {"night_high_iso", "indoor_shadow"}:
+                value = min(0.52, value + 0.08)
+                notes.append("暗部/夜景降噪：优先处理阴影噪点与提亮后颗粒。")
+            elif not result.denoise_recommended and high_noise < 0.35:
+                value = min(value, 0.18)
+                notes.append("当前噪点不重：reduce_noise 自动降为轻度。")
         elif method_id in {"cool_down", "warm_up", "add_magenta", "add_green"}:
             value = 0.22 + color_cast * 0.20
         elif method_id == "portrait_local_face_enhance":

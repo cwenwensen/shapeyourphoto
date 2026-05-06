@@ -31,6 +31,10 @@ Thumbs.db
 desktop.ini
 
 usage_stats.json
+app_settings.json
+app_settings.broken-*.json
 
 _debug/
 *.patch
+*.tmp
+*.bak
