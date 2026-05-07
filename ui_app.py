@@ -13,7 +13,14 @@ from PIL import Image, ImageOps
 
 from analyzer import analyze_image
 from app_settings import (
+    ANALYSIS_CONCURRENCY_AUTO,
+    ANALYSIS_CONCURRENCY_CUSTOM,
+    ANALYSIS_CONCURRENCY_HIGH,
+    ANALYSIS_CONCURRENCY_LOW,
+    ANALYSIS_CONCURRENCY_MEDIUM,
+    AnalysisWorkerPlan,
     AppSettings,
+    GPU_ACCELERATION_OFF,
     REPAIR_SUMMARY_FILTER_ALL,
     REPAIR_SUMMARY_FILTER_DISCARD_RELATED,
     REPAIR_SUMMARY_FILTER_FAILED,
@@ -23,6 +30,7 @@ from app_settings import (
     REPAIR_SUMMARY_FILTER_ROLLBACK_NOOP,
     REPAIR_SUMMARY_FILTER_SKIPPED,
     load_app_settings,
+    resolve_analysis_worker_plan,
     save_app_settings,
     scan_mode_label,
 )
@@ -34,6 +42,7 @@ from diagnostics_chart import DiagnosticsChart
 from drag_drop import WindowsFileDropTarget
 from file_actions import ScanResult, export_cleanup_list, safe_cleanup_paths, scan_image_paths_with_progress
 from history_dialog import show_history_dialog
+from gpu_accel import GPUBackendStatus, gpu_console_label, resolve_gpu_status
 from metadata_utils import summarize_image_metadata
 from models import AnalysisResult, CleanupCandidate, RepairRecord, RepairSelection, SimilarImageGroup
 from preview_cache import ThumbnailCache
@@ -70,8 +79,38 @@ FILTER_OPTIONS = [
 ]
 
 ANALYSIS_PROGRESS_STEPS = 5
-DEFAULT_ANALYSIS_WORKERS = max(1, min(8, os.cpu_count() or 4))
+DEFAULT_ANALYSIS_WORKERS = max(1, min(12, os.cpu_count() or 4))
 DEFAULT_REPAIR_WORKERS = max(1, min(4, max(1, (os.cpu_count() or 4) // 2)))
+ANALYSIS_TIMING_LABELS = [
+    ("读取图片", ("image_read",)),
+    ("打开文件", ("image_open",)),
+    ("EXIF 方向归一", ("exif_transpose",)),
+    ("色彩转换", ("image_convert",)),
+    ("工作图缩放", ("resize", "working_resize")),
+    ("数组转换", ("array_convert",)),
+    ("基础统计", ("basic_stats",)),
+    ("曝光", ("exposure",)),
+    ("色彩", ("color",)),
+    ("清晰度", ("sharpness",)),
+    ("噪点", ("noise",)),
+    ("场景判断", ("scene_classify",)),
+    ("人像/清晰度/噪声/色彩判断", ("face_detect", "portrait_region_build", "quality_stats", "issue_build")),
+    ("人像", ("face_detect", "portrait_region_build")),
+    ("cleanup candidate", ("cleanup_candidate",)),
+]
+ANALYSIS_BATCH_TIMING_LABELS = ANALYSIS_TIMING_LABELS + [
+    ("相似图检测", ("similar_detection",)),
+    ("缩略图/预览/UI", ("thumbnail", "preview", "ui_refresh", "UI_update", "ui_update")),
+    ("Console 刷新", ("console_flush",)),
+]
+REPAIR_TIMING_LABELS = [
+    ("生成修复方案", ("planner",)),
+    ("读取图片", ("image_read",)),
+    ("执行修复步骤", ("candidate_generation", "op:auto_tone", "op:recover_highlights", "op:lift_shadows", "op:boost_contrast", "op:boost_vibrance", "op:reduce_saturation", "op:warm_up", "op:cool_down", "op:add_magenta", "op:add_green", "op:boost_clarity", "op:reduce_noise", "op:portrait_local_face_enhance", "op:portrait_subject_midcontrast", "op:portrait_dark_clothing_detail", "op:protect_high_key_background")),
+    ("候选评分/安全检查", ("candidate_scoring", "mask_build", "mask_feather")),
+    ("保存输出", ("save_output",)),
+    ("元数据保留", ("metadata_preserve",)),
+]
 
 
 class AnalysisCanceled(Exception):
@@ -104,6 +143,7 @@ class PhotoAnalyzerApp:
         self.cleanup_flags: dict[Path, tk.BooleanVar] = {}
         self.similar_groups: list[SimilarImageGroup] = []
         self.item_lookup: dict[str, Path] = {}
+        self.path_item_lookup: dict[Path, str] = {}
         self.cleanup_item_lookup: dict[str, Path] = {}
         self.worker_lock = threading.Lock()
         self.is_busy = False
@@ -112,6 +152,9 @@ class PhotoAnalyzerApp:
         self.list_menu: tk.Menu | None = None
         self.stats = load_stats()
         self.console = AppConsole()
+        self._console_update_pending = False
+        self._last_progress_ui_update = 0.0
+        self._last_repair_phase_update = 0.0
         self._settings_warnings: list[str] = []
         self.settings: AppSettings = load_app_settings(report_warning=self._settings_warnings.append, create_if_missing=True)
         self.drop_target: WindowsFileDropTarget | None = None
@@ -128,6 +171,8 @@ class PhotoAnalyzerApp:
         self._last_scan_summary: str = ""
         self._last_scan_results: list[ScanResult] = []
         self._auto_analyze_after_scan = False
+        self._console_flush_total_ms = 0.0
+        self._console_flush_count = 0
 
         self._configure_style()
         self._build_ui()
@@ -512,17 +557,32 @@ class PhotoAnalyzerApp:
         if not hasattr(self, "console_text"):
             return
 
-        def _update_console() -> None:
+        def _schedule_flush() -> None:
+            if self._console_update_pending:
+                return
+            self._console_update_pending = True
+            self.root.after(120, self._flush_console)
+
+        if threading.current_thread() is threading.main_thread():
+            _schedule_flush()
+        else:
+            self._dispatch_ui(_schedule_flush)
+
+    def _flush_console(self) -> None:
+        self._console_update_pending = False
+        if not hasattr(self, "console_text"):
+            return
+        started_at = time.perf_counter()
+        try:
             self.console_text.config(state="normal")
             self.console_text.delete("1.0", "end")
             self.console_text.insert("1.0", self.console.dump())
             self.console_text.config(state="disabled")
             self.console_text.see("end")
-
-        if threading.current_thread() is threading.main_thread():
-            _update_console()
-        else:
-            self._dispatch_ui(_update_console)
+        except tk.TclError:
+            return
+        self._console_flush_total_ms += (time.perf_counter() - started_at) * 1000.0
+        self._console_flush_count += 1
 
     def choose_folder(self) -> None:
         chosen = filedialog.askdirectory(title="选择图片目录")
@@ -694,7 +754,9 @@ class PhotoAnalyzerApp:
             "settings updated: "
             f"ignore={','.join(self.settings.scan_ignore_prefixes)} | "
             f"default_scan={self.settings.default_scan_mode} | "
-            f"repair_summary_filter={self.settings.repair_summary_default_filter}"
+            f"repair_summary_filter={self.settings.repair_summary_default_filter} | "
+            f"analysis_concurrency={self.settings.analysis_concurrency_mode}:{self.settings.analysis_custom_workers or 'auto'} | "
+            f"gpu={self.settings.gpu_acceleration_mode}"
         )
 
     def show_last_scan_summary(self) -> None:
@@ -810,8 +872,27 @@ class PhotoAnalyzerApp:
         else:
             self._log_console(f"scan skipped summary: root={summary.root} skipped=0")
 
+    def _analysis_worker_plan(self, total: int) -> AnalysisWorkerPlan:
+        return resolve_analysis_worker_plan(
+            total,
+            getattr(self.settings, "analysis_concurrency_mode", ANALYSIS_CONCURRENCY_AUTO),
+            getattr(self.settings, "analysis_custom_workers", 0),
+        )
+
     def _analysis_workers(self, total: int) -> int:
-        return max(1, min(DEFAULT_ANALYSIS_WORKERS, total))
+        return self._analysis_worker_plan(total).actual_workers
+
+    def _analysis_concurrency_label(self, plan: AnalysisWorkerPlan | int) -> str:
+        if isinstance(plan, int):
+            plan = AnalysisWorkerPlan(
+                mode=getattr(self.settings, "analysis_concurrency_mode", ANALYSIS_CONCURRENCY_AUTO),
+                requested_workers=plan,
+                actual_workers=plan,
+            )
+        detail = f"ThreadPool setting={plan.mode} requested={plan.requested_workers} actual={plan.actual_workers}"
+        if plan.reason:
+            detail += f" ({plan.reason})"
+        return detail
 
     def _repair_workers(self, total: int) -> int:
         return max(1, min(DEFAULT_REPAIR_WORKERS, total))
@@ -867,6 +948,8 @@ class PhotoAnalyzerApp:
         cancel_text: str = "取消",
     ) -> None:
         self._task_started_at = time.monotonic()
+        self._last_progress_ui_update = 0.0
+        self._last_repair_phase_update = 0.0
         self.is_busy = True
         self._set_controls_enabled(False)
         self.progress_controller.begin(
@@ -885,6 +968,7 @@ class PhotoAnalyzerApp:
         self.is_busy = False
         self._set_controls_enabled(True)
         self.progress_controller.finish(title=title, detail=detail, status=detail, close_dialog=True)
+        self._flush_console()
 
     def _elapsed_task_text(self) -> str:
         seconds = max(0, int(time.monotonic() - self._task_started_at)) if self._task_started_at else 0
@@ -893,6 +977,165 @@ class PhotoAnalyzerApp:
         if hours:
             return f"耗时 {hours:02d}:{minutes:02d}:{sec:02d}"
         return f"耗时 {minutes:02d}:{sec:02d}"
+
+    def _format_ms(self, value: float) -> str:
+        if value >= 1000.0:
+            return f"{value / 1000.0:.2f}s"
+        return f"{value:.0f}ms"
+
+    def _sum_timings(self, timings: dict[str, float], keys: tuple[str, ...]) -> float:
+        return sum(float(timings.get(key, 0.0)) for key in keys)
+
+    def _format_timing_parts(self, timings: dict[str, float], labels: list[tuple[str, tuple[str, ...]]]) -> str:
+        parts = []
+        for label, keys in labels:
+            value = self._sum_timings(timings, keys)
+            if value > 0.0:
+                parts.append(f"{label} {self._format_ms(value)}")
+        return " | ".join(parts) if parts else "暂无阶段耗时"
+
+    def _slowest_stage(self, timings: dict[str, float], labels: list[tuple[str, tuple[str, ...]]]) -> tuple[str, float]:
+        candidates = [(label, self._sum_timings(timings, keys)) for label, keys in labels]
+        return max(candidates, key=lambda item: item[1], default=("未记录", 0.0))
+
+    def _top_stage_totals(
+        self,
+        records: list[AnalysisResult] | list[RepairRecord],
+        labels: list[tuple[str, tuple[str, ...]]],
+        *,
+        extra_timings: dict[str, float] | None = None,
+        limit: int = 5,
+    ) -> list[tuple[str, float]]:
+        totals: dict[str, float] = {}
+        for record in records:
+            timings = getattr(record, "perf_timings", {})
+            for label, keys in labels:
+                totals[label] = totals.get(label, 0.0) + self._sum_timings(timings, keys)
+        if extra_timings:
+            for label, keys in labels:
+                totals[label] = totals.get(label, 0.0) + self._sum_timings(extra_timings, keys)
+        return [(label, value) for label, value in sorted(totals.items(), key=lambda item: item[1], reverse=True) if value > 0.0][:limit]
+
+    def _format_analysis_perf_line(self, result: AnalysisResult, ui_ms: float) -> str:
+        timings = dict(result.perf_timings)
+        timings["ui_refresh"] = ui_ms
+        parts = self._format_timing_parts(timings, ANALYSIS_TIMING_LABELS + [("UI 刷新", ("ui_refresh",))])
+        total = timings.get("analyze_total", 0.0)
+        return f"analysis timing: {result.path.name} | total {self._format_ms(total)} | {parts}"
+
+    def _format_repair_perf_line(self, record: RepairRecord) -> str:
+        parts = self._format_timing_parts(record.perf_timings, REPAIR_TIMING_LABELS)
+        total = record.perf_timings.get("repair_total", 0.0)
+        return f"repair timing: {record.source_path.name} | total {self._format_ms(total)} | {parts}"
+
+    def _log_analysis_perf_rollup(
+        self,
+        paths: list[Path],
+        batch_timings: dict[str, float],
+        *,
+        total: int,
+        success: int,
+        failed: int,
+        canceled: int,
+        worker_plan: AnalysisWorkerPlan,
+        gpu_status: GPUBackendStatus,
+    ) -> None:
+        records = [self.results[path] for path in paths if path in self.results]
+        batch_timings["console_flush"] = self._console_flush_total_ms
+        batch_timings["UI_update"] = sum(record.perf_timings.get("UI_update", 0.0) for record in records)
+        wall_ms = batch_timings.get("wall_time", batch_timings.get("total_wall_time", 0.0))
+        worker_cumulative_ms = batch_timings.get(
+            "worker_cumulative_time",
+            sum(record.perf_timings.get("worker_wall_time", record.perf_timings.get("analyze_total", 0.0)) for record in records),
+        )
+        analyze_cumulative_ms = batch_timings.get(
+            "analyze_cumulative_time",
+            sum(record.perf_timings.get("analyze_total", 0.0) for record in records),
+        )
+        queue_wait_ms = batch_timings.get("queue_wait_cumulative", batch_timings.get("queue_wait", 0.0))
+        avg_wall_ms = wall_ms / max(1, total)
+        avg_worker_ms = worker_cumulative_ms / max(1, len(records))
+        parallel_factor = worker_cumulative_ms / max(1.0, wall_ms)
+        if not records:
+            self._log_console(
+                f"本轮分析完成：{total} 张，成功 {success}，失败 {failed}，取消 {canceled} | "
+                f"本轮分析真实耗时 {self._format_ms(wall_ms)} | "
+                f"并发模式 {self._analysis_concurrency_label(worker_plan)} | CPU/GPU {gpu_console_label(gpu_status)}"
+            )
+            return
+        self._log_console(
+            f"本轮分析完成：{total} 张，成功 {success}，失败 {failed}，取消 {canceled} | "
+            f"本轮分析真实耗时 {self._format_ms(wall_ms)} | 平均真实等待折算 {self._format_ms(avg_wall_ms)}/张 | "
+            f"并发模式 {self._analysis_concurrency_label(worker_plan)} | "
+            f"CPU/GPU {gpu_console_label(gpu_status)}"
+        )
+        self._log_console(
+            f"analysis audit: wall_time={self._format_ms(wall_ms)} | "
+            f"worker_cumulative_time={self._format_ms(worker_cumulative_ms)}（并发 worker 单图耗时累计，不是用户等待时间） | "
+            f"analyze_cumulative_time={self._format_ms(analyze_cumulative_ms)} | "
+            f"average_wall_time_per_image={self._format_ms(avg_wall_ms)} | "
+            f"average_worker_time_per_image={self._format_ms(avg_worker_ms)} | "
+            f"parallel_efficiency={parallel_factor:.2f}x | "
+            f"queue/wait_cumulative={self._format_ms(queue_wait_ms)} | "
+            f"similar_detection={self._format_ms(batch_timings.get('similar_detection', 0.0))} | "
+            f"UI_update={self._format_ms(batch_timings.get('UI_update', 0.0))} | "
+            f"console_flush={self._format_ms(batch_timings.get('console_flush', 0.0))}/{self._console_flush_count}次"
+        )
+        for record in sorted(records, key=lambda item: item.perf_timings.get("analyze_total", 0.0), reverse=True)[:5]:
+            stage, stage_ms = self._slowest_stage(record.perf_timings, ANALYSIS_TIMING_LABELS)
+            self._log_console(
+                f"analysis slow image: {record.path.name} | total={self._format_ms(record.perf_timings.get('analyze_total', 0.0))} "
+                f"| slowest={stage} {self._format_ms(stage_ms)}"
+            )
+        top_stages = self._top_stage_totals(records, ANALYSIS_BATCH_TIMING_LABELS, extra_timings=batch_timings, limit=5)
+        if top_stages:
+            self._log_console(
+                "analysis slow stages top5: "
+                + " | ".join(f"{label} {self._format_ms(value)}" for label, value in top_stages)
+            )
+        wall_ms = max(1.0, wall_ms)
+        ui_console_ms = batch_timings.get("UI_update", 0.0) + batch_timings.get("console_flush", 0.0)
+        similar_ms = batch_timings.get("similar_detection", 0.0)
+        notes: list[str] = []
+        if parallel_factor < max(1.0, worker_plan.actual_workers * 0.35) and len(records) >= worker_plan.actual_workers:
+            notes.append("worker 并行度偏低，可能受磁盘 IO、Python/GIL 阶段或主线程刷新牵制")
+        if ui_console_ms >= wall_ms * 0.18:
+            notes.append("UI/Console 刷新占比较高")
+        if similar_ms >= wall_ms * 0.20:
+            notes.append("相似图检测占比较高")
+        if queue_wait_ms >= wall_ms * 0.35:
+            notes.append("排队等待较多，可考虑提高并发或减少单张分析耗时")
+        if not notes:
+            notes.append("本轮主要耗时集中在 worker 图像分析阶段")
+        self._log_console("analysis bottleneck notes: " + "；".join(notes))
+
+    def _log_repair_perf_rollup(self, records: list[RepairRecord]) -> None:
+        if not records:
+            return
+        totals = [record.perf_timings.get("repair_total", 0.0) for record in records if record.perf_timings]
+        if not totals:
+            return
+        total_ms = sum(totals)
+        avg_ms = total_ms / max(1, len(totals))
+        saved = sum(1 for record in records if record.saved_output)
+        skipped = sum(1 for record in records if not record.saved_output)
+        rollback_noop = sum(1 for record in records if record.outcome_category in {"forced_rollback", "normal_skipped"} or "rollback" in record.outcome_category or "noop" in record.outcome_category)
+        self._log_console(
+            f"本轮修复总耗时：{self._format_ms(total_ms)} | 平均每张 {self._format_ms(avg_ms)} | "
+            f"保存 {saved}，跳过 {skipped}，回退/no-op {rollback_noop}"
+        )
+        for record in sorted(records, key=lambda item: item.perf_timings.get("repair_total", 0.0), reverse=True)[:5]:
+            stage, stage_ms = self._slowest_stage(record.perf_timings, REPAIR_TIMING_LABELS)
+            self._log_console(
+                f"repair slow image: {record.source_path.name} | total={self._format_ms(record.perf_timings.get('repair_total', 0.0))} "
+                f"| slowest={stage} {self._format_ms(stage_ms)}"
+            )
+        top_stages = self._top_stage_totals(records, REPAIR_TIMING_LABELS, limit=5)
+        if top_stages:
+            self._log_console(
+                "repair slow stages top5: "
+                + " | ".join(f"{label} {self._format_ms(value)}" for label, value in top_stages)
+            )
 
     def _resolve_base_folder(self) -> str:
         raw = self.folder_var.get().strip()
@@ -965,9 +1208,17 @@ class PhotoAnalyzerApp:
         self._analysis_cancel_targets = list(targets)
         self.analysis_phase_progress = {path: 0 for path in targets}
         self._last_analysis_targets = list(targets)
-        worker_count = self._analysis_workers(total)
+        worker_plan = self._analysis_worker_plan(total)
+        worker_count = worker_plan.actual_workers
+        gpu_status = resolve_gpu_status(getattr(self.settings, "gpu_acceleration_mode", GPU_ACCELERATION_OFF))
+        self._console_flush_total_ms = 0.0
+        self._console_flush_count = 0
 
-        self._log_console(f"analysis started: count={total} workers={worker_count}")
+        self._log_console(
+            f"analysis started: count={total} mode={self._analysis_concurrency_label(worker_plan)} "
+            f"gpu={gpu_console_label(gpu_status)}"
+        )
+        self._log_console(gpu_status.reason)
         self._begin_task(
             total * ANALYSIS_PROGRESS_STEPS,
             f"分析中 0/{total}",
@@ -995,6 +1246,8 @@ class PhotoAnalyzerApp:
         def worker() -> None:
             done = 0
             batch_results: dict[Path, AnalysisResult] = {}
+            batch_timings: dict[str, float] = {}
+            batch_started_at = time.perf_counter()
             pool = ThreadPoolExecutor(max_workers=worker_count)
             futures = {}
             try:
@@ -1011,7 +1264,17 @@ class PhotoAnalyzerApp:
                             )
                         )
 
-                    futures[pool.submit(analyze_image, path, progress_callback)] = path
+                    queued_at = time.perf_counter()
+
+                    def analyze_job(p: Path = path, queued: float = queued_at, cb=progress_callback):
+                        started = time.perf_counter()
+                        result = analyze_image(p, cb)
+                        finished = time.perf_counter()
+                        result.perf_timings["worker_queue_wait"] = (started - queued) * 1000.0
+                        result.perf_timings["worker_wall_time"] = (finished - started) * 1000.0
+                        return result
+
+                    futures[pool.submit(analyze_job)] = path
 
                 for future in as_completed(futures):
                     path = futures[future]
@@ -1036,21 +1299,64 @@ class PhotoAnalyzerApp:
                     )
             finally:
                 if cancel_event.is_set():
+                    shutdown_started_at = time.perf_counter()
                     for future in futures:
                         future.cancel()
                     pool.shutdown(wait=True, cancel_futures=True)
-                    self._log_console(f"analysis worker canceled: run={run_id}")
+                    shutdown_ms = (time.perf_counter() - shutdown_started_at) * 1000.0
+                    elapsed_ms = (time.perf_counter() - batch_started_at) * 1000.0
+                    submitted = len(futures)
+                    discarded_results = len(batch_results)
+                    canceled_or_pending = max(0, total - done)
+                    self._dispatch_ui(
+                        lambda rid=run_id, elapsed=elapsed_ms, shutdown=shutdown_ms, sub=submitted, completed=done,
+                        discarded=discarded_results, canceled=canceled_or_pending: self._analysis_cancel_worker_finished(
+                            rid,
+                            total=total,
+                            elapsed_ms=elapsed,
+                            shutdown_ms=shutdown,
+                            submitted=sub,
+                            completed=completed,
+                            discarded_results=discarded,
+                            canceled_or_pending=canceled,
+                        )
+                    )
                 else:
                     pool.shutdown(wait=True)
 
             if not cancel_event.is_set():
                 self._dispatch_ui(lambda rid=run_id, t=total: self._update_similarity_detection_phase(t, rid))
+                similar_started_at = time.perf_counter()
                 similar_groups = detect_similar_groups(
                     targets,
                     batch_results,
                     max_workers=worker_count,
+                    perf_timings=batch_timings,
                 )
-                self._dispatch_ui(lambda rid=run_id, groups=similar_groups: self._analysis_finished(total, rid, groups))
+                similar_ms = (time.perf_counter() - similar_started_at) * 1000.0
+                batch_timings["similar_detection"] = max(batch_timings.get("similar_detection", 0.0), similar_ms)
+                batch_timings["wall_time"] = (time.perf_counter() - batch_started_at) * 1000.0
+                batch_timings["total_wall_time"] = batch_timings["wall_time"]
+                batch_timings["worker_cumulative_time"] = sum(
+                    result.perf_timings.get("worker_wall_time", result.perf_timings.get("analyze_total", 0.0))
+                    for result in batch_results.values()
+                )
+                batch_timings["total_worker_time"] = batch_timings["worker_cumulative_time"]
+                batch_timings["analyze_cumulative_time"] = sum(result.perf_timings.get("analyze_total", 0.0) for result in batch_results.values())
+                batch_timings["average_wall_time_per_image"] = batch_timings["wall_time"] / max(1, total)
+                batch_timings["average_worker_time_per_image"] = batch_timings["worker_cumulative_time"] / max(1, len(batch_results))
+                batch_timings["queue_wait_cumulative"] = sum(result.perf_timings.get("worker_queue_wait", 0.0) for result in batch_results.values())
+                batch_timings["queue_wait"] = batch_timings["queue_wait_cumulative"]
+                self._dispatch_ui(
+                    lambda rid=run_id, groups=similar_groups, timings=batch_timings: self._analysis_finished(
+                        total,
+                        rid,
+                        groups,
+                        timings,
+                        worker_plan,
+                        gpu_status,
+                    )
+                )
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1063,6 +1369,8 @@ class PhotoAnalyzerApp:
             cancel_event.set()
         self._analysis_run_id += 1
         targets = list(self._analysis_cancel_targets or self._last_analysis_targets)
+        cleared_results = sum(1 for path in targets if path in self.results)
+        cleared_errors = sum(1 for path in targets if path in self.errors)
         for path in targets:
             self.results.pop(path, None)
             self.errors.pop(path, None)
@@ -1077,16 +1385,41 @@ class PhotoAnalyzerApp:
         self._analysis_cancel_targets = []
         self._analysis_cancel_event = None
         detail = f"已取消本轮分析，{len(targets)} 张图片保留在列表中，可重新点击“分析全部”。"
-        self._log_console(f"analysis canceled: count={len(targets)} run={canceled_run_id}")
+        elapsed_ms = max(0.0, (time.monotonic() - self._task_started_at) * 1000.0) if self._task_started_at else 0.0
+        self._log_console(
+            f"analysis cancel requested: run={canceled_run_id} | elapsed={self._format_ms(elapsed_ms)} | "
+            f"targets={len(targets)} | cleared_results={cleared_results} | cleared_errors={cleared_errors} | "
+            f"canceled={len(targets)}"
+        )
         self.is_busy = False
         self._set_controls_enabled(True)
         self.progress_controller.finish(title="分析已取消", detail=detail, status=detail, close_dialog=True)
+        self._flush_console()
         self.refresh_tree()
         current = self._current_path()
         if current is not None:
             self.show_preview(current)
         elif targets:
             self._select_path(targets[0])
+
+    def _analysis_cancel_worker_finished(
+        self,
+        run_id: int,
+        *,
+        total: int,
+        elapsed_ms: float,
+        shutdown_ms: float,
+        submitted: int,
+        completed: int,
+        discarded_results: int,
+        canceled_or_pending: int,
+    ) -> None:
+        self._log_console(
+            f"analysis cancel confirmed: run={run_id} | wall={self._format_ms(elapsed_ms)} | "
+            f"submitted={submitted}/{total} | completed_before_stop={completed} | "
+            f"discarded_results={discarded_results} | canceled_or_pending={canceled_or_pending} | "
+            f"worker_shutdown_wait={self._format_ms(shutdown_ms)}"
+        )
 
     def _handle_analysis_item_done(
         self,
@@ -1142,6 +1475,7 @@ class PhotoAnalyzerApp:
                 )
                 save_stats(self.stats)
 
+        ui_started_at = time.perf_counter()
         self.progress_controller.update(
             done=sum(self.analysis_phase_progress.values()),
             total=total * ANALYSIS_PROGRESS_STEPS,
@@ -1151,12 +1485,18 @@ class PhotoAnalyzerApp:
             dialog_title="分析图片中",
             dialog_header="正在逐张分析图片",
         )
-        self.refresh_tree()
+        if not self._refresh_tree_item(path):
+            self.refresh_tree()
+        self._refresh_cleanup_tree()
         current = self._current_path()
         if current is None:
             self._select_path(path)
         elif current == path:
             self.show_preview(path)
+        if result is not None:
+            ui_ms = (time.perf_counter() - ui_started_at) * 1000.0
+            result.perf_timings["UI_update"] = result.perf_timings.get("UI_update", 0.0) + ui_ms
+            self._log_console(self._format_analysis_perf_line(result, ui_ms))
 
     def _run_repair(self, targets: list[Path], selection: RepairSelection) -> None:
         if self.is_busy:
@@ -1165,11 +1505,12 @@ class PhotoAnalyzerApp:
 
         missing = [path for path in targets if path not in self.results and path not in self.errors]
         total_steps = len(missing) + len(targets)
-        analysis_workers = self._analysis_workers(len(missing)) if missing else 0
+        analysis_worker_plan = self._analysis_worker_plan(len(missing)) if missing else None
+        analysis_workers = analysis_worker_plan.actual_workers if analysis_worker_plan is not None else 0
         repair_workers = self._repair_workers(len(targets))
         self._log_console(
             f"repair started: count={len(targets)} pre_analyze={len(missing)} mode={selection.mode} overwrite={selection.overwrite_original} "
-            f"analysis_workers={analysis_workers or 0} repair_workers={repair_workers}"
+            f"analysis_workers={self._analysis_concurrency_label(analysis_worker_plan) if analysis_worker_plan else 0} repair_workers={repair_workers}"
         )
         self._begin_task(
             total_steps,
@@ -1278,6 +1619,7 @@ class PhotoAnalyzerApp:
                                     image_bytes=record.output_path.stat().st_size if record.output_path.exists() else 0,
                                 )
                                 save_stats(self.stats)
+                            self._log_console(self._format_repair_perf_line(record))
 
                     step += 1
                     self._dispatch_ui(lambda s=step, t=total_steps, name=path.name: self._update_progress(s, t, name, "修复中"))
@@ -1308,6 +1650,10 @@ class PhotoAnalyzerApp:
         )
 
     def _update_repair_phase(self, done: int, total: int, filename: str, phase: str) -> None:
+        now = time.monotonic()
+        if now - self._last_repair_phase_update < 0.12:
+            return
+        self._last_repair_phase_update = now
         friendly_phase = self._friendly_repair_phase(phase)
         current_index = min(total, done + 1)
         self.progress_controller.update(
@@ -1361,6 +1707,11 @@ class PhotoAnalyzerApp:
             self.analysis_phase_progress[path] = normalized_step
         aggregate_done = sum(self.analysis_phase_progress.values())
         finished_images = sum(1 for value in self.analysis_phase_progress.values() if value >= ANALYSIS_PROGRESS_STEPS)
+        now = time.monotonic()
+        force_update = normalized_step >= ANALYSIS_PROGRESS_STEPS or aggregate_done >= total_images * ANALYSIS_PROGRESS_STEPS
+        if not force_update and now - self._last_progress_ui_update < 0.10:
+            return
+        self._last_progress_ui_update = now
         friendly_phase = self._friendly_analysis_phase(phase)
         detail = f"处理第 {finished_images + 1}/{total_images} 张：{path.name} | {friendly_phase} | {self._elapsed_task_text()}"
         if total_images > 1:
@@ -1388,11 +1739,28 @@ class PhotoAnalyzerApp:
             dialog_header="正在逐张分析图片",
         )
 
-    def _analysis_finished(self, total: int, run_id: int, similar_groups: list[SimilarImageGroup] | None = None) -> None:
+    def _analysis_finished(
+        self,
+        total: int,
+        run_id: int,
+        similar_groups: list[SimilarImageGroup] | None = None,
+        batch_timings: dict[str, float] | None = None,
+        worker_plan: AnalysisWorkerPlan | None = None,
+        gpu_status: GPUBackendStatus | None = None,
+    ) -> None:
         if run_id != self._analysis_run_id or (self._analysis_cancel_event is not None and self._analysis_cancel_event.is_set()):
             return
-        issue_count = sum(1 for result in self.results.values() if result.issues)
-        error_count = len(self.errors)
+        batch_timings = dict(batch_timings or {})
+        worker_plan = worker_plan or AnalysisWorkerPlan(
+            mode=getattr(self.settings, "analysis_concurrency_mode", ANALYSIS_CONCURRENCY_AUTO),
+            requested_workers=1,
+            actual_workers=1,
+        )
+        gpu_status = gpu_status or resolve_gpu_status(getattr(self.settings, "gpu_acceleration_mode", GPU_ACCELERATION_OFF))
+        target_paths = list(self._last_analysis_targets)
+        issue_count = sum(1 for path in target_paths if path in self.results and self.results[path].issues)
+        error_count = sum(1 for path in target_paths if path in self.errors)
+        success_count = sum(1 for path in target_paths if path in self.results)
         similar_groups = similar_groups or []
         target_set = set(self._last_analysis_targets)
         self.similar_groups = [
@@ -1402,11 +1770,22 @@ class PhotoAnalyzerApp:
         similar_count = len(similar_groups)
         detail = f"分析完成：问题图片 {issue_count} 张，失败 {error_count} 张，相似组 {similar_count} 组。"
         self._log_console(f"analysis finished: count={total} issues={issue_count} errors={error_count} similar_groups={similar_count}")
+        self._log_analysis_perf_rollup(
+            self._last_analysis_targets,
+            batch_timings,
+            total=total,
+            success=success_count,
+            failed=error_count,
+            canceled=0,
+            worker_plan=worker_plan,
+            gpu_status=gpu_status,
+        )
         for group in similar_groups:
             self._log_console(
                 f"similar group: #{group.group_id} count={len(group.paths)} score={group.similarity:.2f} | {group.reason}"
             )
         self.analysis_phase_progress = {}
+        self.refresh_tree()
         self.progress_controller.update(
             done=total * ANALYSIS_PROGRESS_STEPS,
             total=max(1, total * ANALYSIS_PROGRESS_STEPS),
@@ -1545,6 +1924,7 @@ class PhotoAnalyzerApp:
         self._log_console(
             f"repair finished: success={len(repaired)} skipped={len(skipped)} failed={len(failed)} overwrite={selection.overwrite_original}"
         )
+        self._log_repair_perf_rollup(repaired + skipped)
         self.progress_controller.update(
             done=total,
             total=max(1, total),
@@ -1856,34 +2236,50 @@ class PhotoAnalyzerApp:
             return ""
         return f"相似组#{'/'.join(group_ids[:2])}"
 
+    def _tree_row_values(self, path: Path) -> tuple[str, str, str, str]:
+        result = self.results.get(path)
+        error = self.errors.get(path)
+        checked = "已选" if self.selected_flags.get(path, tk.BooleanVar(value=False)).get() else "待定"
+        status = "失败" if error else "已分析" if result else "未分析"
+        risk = "-" if error or not result else f"{result.overall_score:.2f}"
+        if error:
+            tags = "分析失败"
+        elif result and result.issues:
+            tags = "、".join(issue.label for issue in result.issues)
+        elif result:
+            tags = "正常"
+        else:
+            tags = ""
+        similar_marker = self._similar_marker_for_path(path)
+        if similar_marker:
+            tags = f"{tags} | {similar_marker}" if tags else similar_marker
+        return checked, status, risk, tags
+
+    def _refresh_tree_item(self, path: Path) -> bool:
+        item_id = self.path_item_lookup.get(path)
+        if not item_id or not self.tree.exists(item_id):
+            return False
+        if not self._matches_filter(self.results.get(path), self.errors.get(path)):
+            self.tree.delete(item_id)
+            self.item_lookup.pop(item_id, None)
+            self.path_item_lookup.pop(path, None)
+            return True
+        self.tree.item(item_id, text=path.name, values=self._tree_row_values(path))
+        return True
+
     def refresh_tree(self) -> None:
         self._prune_missing_paths()
         current_path = self._current_path()
         for item in self.tree.get_children():
             self.tree.delete(item)
         self.item_lookup.clear()
+        self.path_item_lookup.clear()
 
         for path in self._sorted_paths():
-            result = self.results.get(path)
-            error = self.errors.get(path)
-            checked = "已选" if self.selected_flags.get(path, tk.BooleanVar(value=False)).get() else "待定"
-            status = "失败" if error else "已分析" if result else "未分析"
-            risk = "-" if error or not result else f"{result.overall_score:.2f}"
-            if error:
-                tags = "分析失败"
-            elif result and result.issues:
-                tags = "、".join(issue.label for issue in result.issues)
-            elif result:
-                tags = "正常"
-            else:
-                tags = ""
-            similar_marker = self._similar_marker_for_path(path)
-            if similar_marker:
-                tags = f"{tags} | {similar_marker}" if tags else similar_marker
-
             thumb = self.thumb_cache.get_tree_thumbnail(path)
-            item_id = self.tree.insert("", "end", text=path.name, image=thumb, values=(checked, status, risk, tags))
+            item_id = self.tree.insert("", "end", text=path.name, image=thumb, values=self._tree_row_values(path))
             self.item_lookup[item_id] = path
+            self.path_item_lookup[path] = item_id
             if path == current_path:
                 self.tree.selection_set(item_id)
         self._refresh_cleanup_tree()

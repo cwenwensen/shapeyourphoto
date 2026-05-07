@@ -823,12 +823,14 @@ def repair_image_file(
 
     if progress_callback is not None:
         progress_callback("读取图片与元数据")
+    started_at = time.perf_counter()
     with Image.open(source_path) as img:
         exif_bytes = img.info.get("exif")
         dpi = img.info.get("dpi")
         icc_profile = img.info.get("icc_profile")
         xmp_data = img.info.get("xmp")
         image = ImageOps.exif_transpose(img).convert("RGB")
+    _add_timing(perf_timings, "image_read", started_at)
 
     policy_notes: list[str] = []
     warnings: list[str] = []

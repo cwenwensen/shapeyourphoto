@@ -38,3 +38,7 @@ _debug/
 *.patch
 *.tmp
 *.bak
+
+/test/*
+!/test/README.md
+!/test/.gitkeep

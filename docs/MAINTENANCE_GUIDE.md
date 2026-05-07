@@ -87,6 +87,25 @@
 - 功能变化后，应同步更新 `docs/`
 - 版本变化后，应同步更新 [CHANGELOG.md](/E:/aitools/shapeyourphoto/CHANGELOG.md) 和 [app_metadata.py](/E:/aitools/shapeyourphoto/app_metadata.py)
 - 不要留下临时 handover 垃圾文档
+
+## 1.1.5 Maintenance Addendum
+
+### 性能与 Console 边界
+
+- 批量分析和批量修复继续使用受控线程池；不要把结果收集改回按提交顺序逐个等待。
+- Tk 更新必须继续回主线程，但 Console 文本框不应每条日志都重绘整块内容；应保留合并刷新，避免后台 worker 的日志吞掉并发收益。
+- `perf_timings` 是正式性能记录入口。新增阶段耗时时应复用它，不要另建平行计时体系。
+- Console 只输出用户可理解的阶段摘要、总耗时、平均耗时、最慢图片和最慢阶段；内部阈值、评分公式和过细算法细节留在代码或 debug 说明中。
+- 批量分析完成摘要应保留 `total_wall_time`、`total_worker_time`、`queue/wait`、`similar_detection`、`UI_update`、`console_flush` 和 top slow stages；这是定位低 CPU 利用率的第一入口。
+- 主列表单张结果更新应优先定点更新 Treeview 行，避免每完成一张都重建整张缩略图列表；需要稳定排序时在批次完成后统一刷新。
+- GPU 加速设置必须保持可选：检测可选后端失败时不得影响启动，不得把 CUDA/CuPy/OpenCV-CUDA/torch 变成必需依赖，不得为了 GPU 把大图对象跨进程或跨设备来回搬运。
+
+### 相似组内对比窗口边界
+
+- 底部全局按钮区必须固定在窗口底部，图片区只能滚动或分页，不能把底部按钮挤出可视范围。
+- 每张图的“删除此图”按钮必须随卡片内容保持可达；不能依赖用户手动拉大窗口才能看到。
+- 默认窗口尺寸要按屏幕限制裁剪，不能超出屏幕。
+- 除非改动相似图算法，不要重复跑 `DSC_2621.JPG` / `DSC_2622.JPG` / `DSC_2623.JPG` 等旧样张大规模回归。
 ## 1.1.4 Maintenance Addendum
 
 ### 分析器维护边界
@@ -151,3 +170,17 @@
 - 相似图删除必须继续走 `safe_cleanup_paths()`；不要在相似图窗口中直接 `unlink()` 或永久删除。
 - 同一张图可同时出现在 cleanup candidate 和 similar group 中，UI 只显示标记，不自动删除。
 - 调整阈值时需要同时验证明显重复/连拍可分组，以及不同场景不会被大量误分组。
+# 1.1.5 Real-Image Performance Maintenance Notes
+
+- Use `/test` for local real-photo performance and regression checks. Do not commit user photos; `.gitignore` keeps `/test` image files out of version control while preserving `test/README.md`.
+- Prefer `python benchmark_test_images.py` when checking performance. The benchmark must be allowed to skip when `/test` is empty.
+- Console timing must lead with real `wall_time`. `worker_cumulative_time` is diagnostic only and can exceed wall time under concurrency.
+- Any worker-setting change must go through `resolve_analysis_worker_plan()` so UI, benchmark scripts, and repair pre-analysis agree on requested and actual worker counts.
+- Do not lower working-image size without checking `/test` quality. In this run, 3072 introduced extra high-noise flags; 4096 preserved the existing 6 issue images, 3 cleanup candidates, and 4 similar groups.
+- GPU remains optional detection/fallback. Do not add hard CUDA/CuPy/OpenCV-CUDA/torch dependencies, and do not claim GPU acceleration until `/test` proves real offload benefit.
+# 1.1.5 Analysis Cancel Maintenance Note
+
+- Batch analysis cancel is a state consistency path, not an algorithm path. Do not change analysis thresholds or image metrics when maintaining it.
+- Cancel should immediately preserve `image_paths`, clear this run's `results`, `errors`, `cleanup_flags`, `analysis_phase_progress`, and target-related `similar_groups`, then re-enable controls for a new analysis run.
+- Background workers may finish after cancel, but stale callbacks are rejected by `run_id`; they must not write results, progress, cleanup prompts, similar prompts, or final summaries to UI.
+- Console should log both the cancel request and the later worker shutdown confirmation, including elapsed time and canceled/pending counts.

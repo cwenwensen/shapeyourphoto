@@ -69,6 +69,16 @@
 - 条图区域尽量高，顶部说明尽量精简
 - 弹窗底部按钮必须完整可见
 - 条图信息尽量多显示，但不要以可读性为代价
+
+## 1.1.5 Maintenance Addendum: Similar Review And Console Timing
+
+- 相似图片组内对比窗口打开时，默认尺寸应尽量容纳说明区、图片区、文件名/摘要、每图“删除此图”按钮和底部全局按钮。
+- 窗口不得超出屏幕；当屏幕高度不足时，图片区负责滚动，底部“跳过本组 / 跳过所有剩余组 / 结束选择”保持固定可见。
+- 2、3、4 张相似图可在当前页打开；5 张以上分页，每页最多 4 张。
+- “窗口过小”提示基于完整 UI 所需空间，不只基于图片预览区域。
+- Console 现在显示分析/修复阶段耗时摘要和批量 top slow steps；长细节继续放在详情窗口、`perf_notes` 或 debug 信息中，避免刷屏拖慢 UI。
+- 应用设置的“性能”页提供分析并发模式和 GPU 加速模式。GPU 未检测到可用后端时仅显示原因并回退 CPU，不阻断扫描、导入、拖拽、分析、相似图或修复流程。
+- 批量分析过程中主列表按单行更新当前结果；批次完成后统一刷新排序、cleanup candidate 标记和相似组标记。
 ## 1.1.3 Maintenance Addendum: Cleanup Candidate Panel
 
 以下内容保留为 1.1.3 首次引入 cleanup candidate 面板时的历史说明；1.1.4 在其基础上继续扩展多选、主菜单复开和滚动完成详情。
@@ -151,3 +161,9 @@
 - 每张图显示预览、文件名、风险值、场景、人像判断、问题摘要、推荐修复和 cleanup candidate 标记；“删除此图”必须二次确认。
 - 相似图删除复用全局 `safe_cleanup_paths()`：优先回收站，失败后进入 `_cleanup_candidates`，再失败则弹窗显示原因。
 - 删除成功后刷新相似组、主缩略图列表、cleanup candidate 列表和文件存在状态；未删除图片的分析结果、修复建议和扫描摘要不变。
+# 1.1.5 Analysis Cancel Verification Addendum
+
+- During batch analysis, clicking cancel keeps the file list intact and clears this run's partial results, errors, cleanup flags, progress, and similar groups for the canceled target set.
+- Stale background callbacks must be ignored by `run_id`; canceled workers may finish CPU work, but they must not write results, progress, final summaries, cleanup prompts, or similar-group prompts back to the UI.
+- Cancel Console output must include elapsed time, target count, cleared result/error count, canceled count, and a later worker shutdown confirmation.
+- After cancel, controls are re-enabled immediately so the same list can be analyzed again.

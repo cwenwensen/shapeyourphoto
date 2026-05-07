@@ -1,5 +1,16 @@
 # 更新历史
 
+## 1.1.5 - 2026-05-07
+
+- 修复“相似图片组内对比”窗口默认尺寸不足时每张图片下方“删除此图”按钮可能被遮挡的问题；图片区改为独立可滚动区域，底部“跳过本组 / 跳过所有剩余组 / 结束选择”固定在窗口底部。
+- 调整组内对比窗口默认尺寸与小窗口提示阈值：常规屏幕默认尽量展示 2/3/4 张的完整卡片，5 张以上继续分页；小屏不超出屏幕，图片区滚动可达。
+- 分析阶段补齐 `perf_timings`：读取图片、基础统计、场景判断、人像/清晰度/噪声/色彩判断、cleanup candidate、相似图检测与 UI 刷新耗时会进入 Console 摘要。
+- 修复阶段补齐 Console 摘要：生成修复方案、读取图片、执行主要修复步骤、候选评分/安全检查、保存输出、元数据保留和批量 top slow steps。
+- 分析结束后新增批次级性能审计：输出 total/wall/worker/average、queue/wait、slowest images top 5、slowest stages top 5、相似检测、UI 刷新与 Console 刷新耗时，并给出轻量瓶颈提示。
+- 应用设置新增分析并发模式（自动/低/中/高/自定义 worker 数）和 GPU 加速模式（关闭/自动/开启）；GPU 后端只做可选检测，缺少 CuPy、OpenCV-CUDA、torch CUDA 或设备时自动回退 CPU。
+- 批量分析单张完成后改为定点更新 Treeview 行，避免反复重建整张缩略图列表；默认自动分析 worker 上限从 8 提升到 12，同时保留安全并发设置。
+- Console 文本框改为合并刷新，降低多线程分析/修复时由日志重绘造成的 Tk 主线程压力；本轮未改变分析算法、相似图判断规则或修复风格。
+
 ## 1.1.4 Similar Images Addendum
 
 - 修复相似组复核窗口布局：滚动列表独占可扩展区域，底部按钮固定，卡片按内容自适应高度；筛选增加低置信候选。
@@ -92,3 +103,17 @@
 - 进度模块独立为统一控制器，目录读取、分析和修复共用同一套状态更新逻辑。
 - 恢复导入、分析、修复三类任务的真实进度显示，并补回独立进度弹窗。
 - 分析维度新增色彩寡淡与饱和度偏高。
+## 1.1.5 Analysis Cancel Addendum - 2026-05-07
+
+- Tightened batch-analysis cancel state consistency: cancel keeps the file list, clears partial results/errors/cleanup flags/similar groups for the canceled run, and allows immediate re-analysis.
+- Added Console cancel summaries with elapsed time, cleared/canceled counts, and a later worker shutdown confirmation.
+- Kept stale background result protection based on run id; no analysis algorithm or threshold changes.
+
+## 1.1.5 Real-Image Performance Addendum - 2026-05-07
+
+- Added `/test` local real-photo benchmark workflow and `benchmark_test_images.py`; `/test` image files stay ignored by git, with only README/.gitkeep allowed.
+- Corrected batch analysis timing terminology: Console now leads with real wall time and labels worker cumulative time as cumulative worker effort, not user wait time.
+- Centralized analysis worker planning so low/medium/high/custom settings affect the actual executor and report requested vs actual worker counts.
+- Added conservative working-image analysis for large photos, scaled result regions back to original coordinates, and kept noise conclusions stable with pixel-scale correction.
+- Used Pillow JPEG `draft()` in similar feature extraction to avoid unnecessary full-size decode for hash/vector stages.
+- `/test` real 16-photo benchmark: high mode improved from 53.29s wall time to 23.92s; quality spot check stayed at 6 issue images, 3 cleanup candidates, and 4 similar groups.

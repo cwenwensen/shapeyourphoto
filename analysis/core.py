@@ -32,6 +32,67 @@ from .discard import build_cleanup_candidates
 from .portrait import analyze_portrait_regions, confirm_portrait, detect_portrait_regions
 
 
+ANALYSIS_WORKING_MAX_SIDE = 4096
+
+
+def _working_image_from_rgb(
+    image: Image.Image,
+    perf_timings: dict[str, float],
+) -> tuple[Image.Image, tuple[int, int], tuple[int, int], bool]:
+    import time
+
+    original_size = image.size
+    longest = max(original_size)
+    if longest <= ANALYSIS_WORKING_MAX_SIDE:
+        return image, original_size, original_size, False
+
+    scale = ANALYSIS_WORKING_MAX_SIDE / float(longest)
+    working_size = (
+        max(1, int(round(original_size[0] * scale))),
+        max(1, int(round(original_size[1] * scale))),
+    )
+    started_at = time.perf_counter()
+    working = image.resize(working_size, Image.Resampling.BILINEAR)
+    add_timing(perf_timings, "resize", started_at)
+    return working, original_size, working_size, True
+
+
+def _scale_box_to_original(
+    box: tuple[int, int, int, int],
+    scale_x: float,
+    scale_y: float,
+    original_size: tuple[int, int],
+) -> tuple[int, int, int, int]:
+    original_w, original_h = original_size
+    x0, y0, x1, y1 = box
+    return (
+        max(0, min(original_w, int(round(x0 * scale_x)))),
+        max(0, min(original_h, int(round(y0 * scale_y)))),
+        max(0, min(original_w, int(round(x1 * scale_x)))),
+        max(0, min(original_h, int(round(y1 * scale_y)))),
+    )
+
+
+def _scale_region_to_original(
+    region: tuple[int, int, int, int] | None,
+    scale_x: float,
+    scale_y: float,
+    original_size: tuple[int, int],
+) -> tuple[int, int, int, int] | None:
+    if region is None:
+        return None
+    return _scale_box_to_original(region, scale_x, scale_y, original_size)
+
+
+def _scale_boxes_to_original(
+    boxes: list[tuple[int, int, int, int]],
+    scale_x: float,
+    scale_y: float,
+    original_size: tuple[int, int],
+) -> list[tuple[int, int, int, int]]:
+    return [_scale_box_to_original(box, scale_x, scale_y, original_size) for box in boxes]
+
+
 def _bright_component_stats(mask: np.ndarray) -> tuple[float, bool, float]:
     cleaned = cleanup_binary_mask(mask)
     components = component_boxes(cleaned)
@@ -510,14 +571,33 @@ def analyze_image(path: str | Path, progress_callback: Callable[[int, int, str],
     analyze_started_at = time.perf_counter()
     if progress_callback is not None:
         progress_callback(1, 5, "读取图像")
+    image_read_started_at = time.perf_counter()
     with Image.open(image_path) as img:
-        rgb = ImageOps.exif_transpose(img).convert("RGB")
+        add_timing(perf_timings, "image_open", image_read_started_at)
+        started_at = time.perf_counter()
+        transposed = ImageOps.exif_transpose(img)
+        add_timing(perf_timings, "exif_transpose", started_at)
+        started_at = time.perf_counter()
+        rgb_full = transposed.convert("RGB")
+        add_timing(perf_timings, "image_convert", started_at)
+    add_timing(perf_timings, "image_read", image_read_started_at)
 
+    rgb, original_size, working_size, resized_for_analysis = _working_image_from_rgb(rgb_full, perf_timings)
+    if resized_for_analysis:
+        rgb_full.close()
+    original_width, original_height = original_size
+    scale_x = original_width / max(1, working_size[0])
+    scale_y = original_height / max(1, working_size[1])
+
+    basic_stats_started_at = time.perf_counter()
+    started_at = time.perf_counter()
     arr = np.asarray(rgb, dtype=np.float32)
     gray = (arr[:, :, 0] * 0.299 + arr[:, :, 1] * 0.587 + arr[:, :, 2] * 0.114) / 255.0
+    add_timing(perf_timings, "array_convert", started_at)
 
     if progress_callback is not None:
         progress_callback(2, 5, "统计亮度、主体与背景")
+    started_at = time.perf_counter()
     brightness = float(np.mean(gray))
     highlight_ratio = float(np.mean(gray >= 0.96))
     clipped_highlights = float(np.mean(gray >= 0.985))
@@ -525,14 +605,19 @@ def analyze_image(path: str | Path, progress_callback: Callable[[int, int, str],
     crushed_shadows = float(np.mean(gray <= 0.03))
     contrast = float(np.std(gray))
     dyn_range = float(np.percentile(gray, 95) - np.percentile(gray, 5))
-    local_dyn = local_range(gray)
     scene_detail = float(np.var(gray))
-    _, sharp_p90, sharp_max = tile_sharpness(gray)
     p50 = float(np.percentile(gray, 50))
     p95 = float(np.percentile(gray, 95))
     p99 = float(np.percentile(gray, 99))
     p999 = float(np.percentile(gray, 99.9))
+    add_timing(perf_timings, "exposure", started_at)
 
+    started_at = time.perf_counter()
+    local_dyn = local_range(gray)
+    _, sharp_p90, sharp_max = tile_sharpness(gray)
+    add_timing(perf_timings, "sharpness", started_at)
+
+    started_at = time.perf_counter()
     r_mean = float(np.mean(arr[:, :, 0])) / 255.0
     g_mean = float(np.mean(arr[:, :, 1])) / 255.0
     b_mean = float(np.mean(arr[:, :, 2])) / 255.0
@@ -569,6 +654,8 @@ def analyze_image(path: str | Path, progress_callback: Callable[[int, int, str],
         neutral_b = float(np.mean(arr[:, :, 2][neutral_mask])) / 255.0
         neutral_balance = max(abs(neutral_r - neutral_g), abs(neutral_g - neutral_b), abs(neutral_r - neutral_b))
     hdr_hint = 1.0 if "HDR" in image_path.name.upper() else 0.0
+    add_timing(perf_timings, "color", started_at)
+    add_timing(perf_timings, "basic_stats", basic_stats_started_at)
 
     started_at = time.perf_counter()
     portrait_detect = detect_portrait_regions(rgb)
@@ -607,16 +694,22 @@ def analyze_image(path: str | Path, progress_callback: Callable[[int, int, str],
 
     if progress_callback is not None:
         progress_callback(3, 5, "计算锐度、色彩与人像特征")
+    started_at = time.perf_counter()
     noise_probe = gray - np.clip((gray + np.roll(gray, 1, 0) + np.roll(gray, -1, 0) + np.roll(gray, 1, 1) + np.roll(gray, -1, 1)) / 5.0, 0.0, 1.0)
-    noise_score_raw = float(np.std(noise_probe))
+    noise_scale_correction = np.sqrt(max(working_size) / max(1, max(original_size)))
+    noise_score_raw = float(np.std(noise_probe)) * min(1.0, max(0.0, noise_scale_correction))
+    add_timing(perf_timings, "noise", started_at)
+    started_at = time.perf_counter()
     edge_density_value = edge_density(gray)
     window_component_ratio, window_border_touch, window_rect_score = _bright_component_stats(gray >= 0.74)
     highlight_texture = _highlight_texture(gray, gray >= 0.90)
+    add_timing(perf_timings, "quality_stats", started_at)
 
     issues: list[Issue] = []
     if progress_callback is not None:
         progress_callback(4, 5, "判定问题标签与修复建议")
 
+    started_at = time.perf_counter()
     scene_type, scene_exposure_type, highlight_recovery_type, scene_tags, scene_notes = _classify_scene(
         brightness=brightness,
         highlight_ratio=highlight_ratio,
@@ -643,6 +736,9 @@ def analyze_image(path: str | Path, progress_callback: Callable[[int, int, str],
         portrait_likely=portrait_likely,
         portrait_type=portrait_type,
     )
+    add_timing(perf_timings, "scene_classify", started_at)
+
+    started_at = time.perf_counter()
     noise_severity, noise_level, denoise_profile, denoise_recommended, noise_detail, noise_suggestion = _classify_noise_profile(
         noise_score_raw=noise_score_raw,
         brightness=brightness,
@@ -774,6 +870,7 @@ def analyze_image(path: str | Path, progress_callback: Callable[[int, int, str],
         b_mean=b_mean,
     )
     issues.extend(color_issues)
+    add_timing(perf_timings, "issue_build", started_at)
 
     if progress_callback is not None:
         progress_callback(5, 5, "生成指标与最终结果")
@@ -811,8 +908,9 @@ def analyze_image(path: str | Path, progress_callback: Callable[[int, int, str],
         metric("噪声指标", noise_score_raw, f"{noise_score_raw:.4f}", "#7c9db7", max_value=0.05),
     ]
 
-    add_timing(perf_timings, "analyze_total", analyze_started_at)
     perf_notes: list[str] = []
+    if resized_for_analysis:
+        perf_notes.append(f"working image {original_width}x{original_height} -> {working_size[0]}x{working_size[1]}")
     if perf_timings.get("face_detect", 0.0) > 75.0:
         perf_notes.append("人脸候选筛选耗时较长")
     if perf_timings.get("portrait_region_build", 0.0) > 45.0:
@@ -823,36 +921,55 @@ def analyze_image(path: str | Path, progress_callback: Callable[[int, int, str],
         perf_notes.append("检测到多人像区域")
     issues = sanitize_issues(issues)
     overall = max((item.score for item in issues), default=0.0)
+    started_at = time.perf_counter()
     cleanup_candidates = build_cleanup_candidates(image_path, issues)
+    add_timing(perf_timings, "cleanup_candidate", started_at)
+    perf_timings["analyze_total"] = (time.perf_counter() - analyze_started_at) * 1000.0
+    if perf_timings.get("analyze_total", 0.0) > 260.0 and "分析耗时较长" not in perf_notes:
+        perf_notes.append("分析耗时较长")
 
     diagnostic_tags = list(dict.fromkeys(list(portrait_data["diagnostic_tags"]) + scene_tags))
     diagnostic_notes = list(dict.fromkeys(list(portrait_data["diagnostic_notes"]) + scene_notes + exposure_notes))
     if highlight_recovery_type == "unrecoverable_highlights" and "avoid_gray_sky" not in diagnostic_tags:
         diagnostic_tags.append("avoid_gray_sky")
 
+    scaled_raw_face_candidates = _scale_boxes_to_original(raw_face_candidates, scale_x, scale_y, original_size)
+    scaled_validated_face_boxes = _scale_boxes_to_original(validated_face_boxes, scale_x, scale_y, original_size)
+    scaled_subject_boxes = _scale_boxes_to_original(list(portrait_data.get("subject_boxes", [])), scale_x, scale_y, original_size)
+    scaled_face_candidates = list(face_candidates)
+    for candidate in scaled_face_candidates:
+        candidate.box = _scale_box_to_original(candidate.box, scale_x, scale_y, original_size)
+    scaled_face_stats = list(portrait_data.get("face_stats", []))
+    for face_stat in scaled_face_stats:
+        face_stat.box = _scale_box_to_original(face_stat.box, scale_x, scale_y, original_size)
+    scaled_face_region = _scale_region_to_original(portrait_data["face_region"], scale_x, scale_y, original_size)
+    scaled_subject_region = _scale_region_to_original(portrait_data["subject_region"], scale_x, scale_y, original_size)
+    scaled_background_region = _scale_region_to_original(portrait_data["background_region"], scale_x, scale_y, original_size)
+    scaled_highlight_region = _scale_region_to_original(portrait_data["highlight_region"], scale_x, scale_y, original_size)
+
     return AnalysisResult(
         path=image_path,
-        width=rgb.width,
-        height=rgb.height,
+        width=original_width,
+        height=original_height,
         overall_score=overall,
         issues=issues,
         metrics=metrics,
         face_count=len(raw_face_candidates),
         raw_face_count=len(raw_face_candidates),
-        face_boxes=validated_face_boxes,
-        raw_face_candidates=raw_face_candidates,
-        validated_face_boxes=validated_face_boxes,
+        face_boxes=scaled_validated_face_boxes,
+        raw_face_candidates=scaled_raw_face_candidates,
+        validated_face_boxes=scaled_validated_face_boxes,
         validated_face_count=len(validated_face_boxes),
         rejected_face_count=rejected_face_count,
         face_confidence=float(max(face_confidences, default=0.0)),
         face_confidences=face_confidences,
-        face_candidates=face_candidates,
-        subject_boxes=list(portrait_data.get("subject_boxes", [])),
-        face_stats=list(portrait_data.get("face_stats", [])),
-        face_region=portrait_data["face_region"],
-        subject_region=portrait_data["subject_region"],
-        background_region=portrait_data["background_region"],
-        highlight_region=portrait_data["highlight_region"],
+        face_candidates=scaled_face_candidates,
+        subject_boxes=scaled_subject_boxes,
+        face_stats=scaled_face_stats,
+        face_region=scaled_face_region,
+        subject_region=scaled_subject_region,
+        background_region=scaled_background_region,
+        highlight_region=scaled_highlight_region,
         portrait_likely=portrait_likely,
         portrait_type=portrait_type,
         portrait_scene_type=str(portrait_data["portrait_scene_type"]),

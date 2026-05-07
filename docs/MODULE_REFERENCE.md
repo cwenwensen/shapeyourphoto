@@ -29,6 +29,7 @@
 - 主界面控制中心
 - 管理列表、筛选、预览信息、分析、修复、进度、拖拽接入
 - 这是最敏感的主流程文件之一
+- `1.1.5` 起还负责 Console 合并刷新、分析/修复阶段耗时摘要、批量 top slow steps、分析 worker 并发设置消费、GPU 状态提示和主列表单行更新。
 
 ### [history_dialog.py](/E:/aitools/shapeyourphoto/history_dialog.py)
 
@@ -89,6 +90,7 @@
 - 负责输出文件、元数据写回、EXIF 方向一致性
 - 人像候选修复、评分、回退，以及修复后安全检查都在这里汇总并写回 `RepairRecord`
 - cleanup candidate 强制尝试修复、结果分类和“仍不适合保存”回退也在这里完成
+- `perf_timings` 记录生成方案、读取图片、候选生成/评分、保存输出和元数据保留等阶段耗时。
 
 ## 文件与元数据
 
@@ -133,6 +135,12 @@
 
 - 数据结构定义
 - 新增字段时优先从这里统一设计
+
+### [similar_review_dialog.py](/E:/aitools/shapeyourphoto/similar_review_dialog.py)
+
+- 相似组列表窗口和组内对比窗口。
+- 组内对比窗口的图片区可滚动，底部全局操作区固定；每图“删除此图”按钮必须保持可达。
+- 修改窗口尺寸、分页或卡片布局时，要验证 2、3、4、5+ 张路径下按钮不被遮挡。
 
 ## 项目元信息
 
@@ -189,6 +197,10 @@
   - 负责通用 cleanup candidate 生成，不再把“建议删除”耦合在人像虚焦逻辑中。
 - `analysis/common.py`
   - 存放共享的统计、掩膜、性能计时和文案兜底工具。
+- `gpu_accel.py`
+  - 检测可选 GPU 后端（CuPy、OpenCV-CUDA、torch CUDA），并给出 CPU 回退原因；不得成为启动必需依赖。
+- `app_settings.py` / `settings_dialog.py`
+  - 持久化应用设置、扫描偏好、修复详情筛选、分析并发模式与 GPU 加速模式。
 
 ### 修复计划与执行
 
@@ -225,6 +237,7 @@
 
 - 分析批次完成后的相似图片检测模块。
 - 只读取缩略图级特征：aHash、dHash、颜色/亮度直方图、低分辨率灰度结构、尺寸比例和可靠拍摄时间。
+- 接收批次 `perf_timings`，记录 feature extract、candidate pair build、pair compare、group build 与 total similar detection 耗时。
 - 输出批次级 `SimilarImageGroup`，不修改单张 `AnalysisResult`。
 - 100 张以内可直接做轻量特征对比；更大批次通过哈希、尺寸和时间分桶减少候选对。
 
@@ -238,3 +251,11 @@
 
 - 新增 `SimilarImageGroup`，用于保存相似组编号、路径列表、相似度、等级、依据和可能连拍标记。
 - 该结构属于分析批次附加结果，不进入单张图片的质量问题或修复策略字段。
+# 1.1.5 Performance Module Addendum
+
+- `benchmark_test_images.py`: local-only `/test` benchmark runner. It skips safely when no local photos exist and reports wall time, worker cumulative time, queue/wait time, slow stages, slow images, similar detection time, issue count, and cleanup candidate count.
+- `app_settings.resolve_analysis_worker_plan()`: central source of truth for analysis worker mode, requested workers, actual workers, and cap reason.
+- `analysis/core.py`: large images use a bounded working image for heavy numeric analysis, then return dimensions and analysis regions in original-image coordinates. `perf_timings` includes resize and existing stage timings.
+- `similar_detector.py`: feature extraction can use Pillow JPEG `draft()` to avoid decoding full-size images for small hash/vector features.
+- `ui_app.py`: Console batch rollups distinguish `wall_time` from `worker_cumulative_time` and keep Tk updates on the main thread.
+- `gpu_accel.py`: optional backend detection and CPU fallback only; no required GPU dependency and no claimed default GPU offload.

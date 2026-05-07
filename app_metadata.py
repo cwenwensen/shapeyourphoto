@@ -1,10 +1,31 @@
 from __future__ import annotations
 
 APP_NAME = "图片质量分析、修复与清理工具"
-APP_VERSION = "1.1.4"
+APP_VERSION = "1.1.5"
 APP_ID = "codex.photo.analyzer.desktop"
 
 CHANGELOG: list[dict[str, object]] = [
+    {
+        "version": "1.1.5",
+        "date": "2026-05-07",
+        "items": [
+            "批量分析取消路径小修：取消后保留文件列表，清空本轮已写入的分析结果/错误/cleanup 标记/相似组标记，旧后台回调继续通过 run_id 拒绝写回，用户可立即重新分析。",
+            "Console 增加分析取消摘要：记录取消时已耗时、目标数量、清空结果/错误数量、取消数量，并在 worker 收尾后补充提交数、停止前完成数、丢弃结果数和后台停止等待耗时。",
+            "基于项目根目录 /test 真实样张建立本地性能基准：图片文件继续忽略不入库，仅保留 README 说明；新增 benchmark_test_images.py，可在 /test 为空时安全跳过。",
+            "修正 Console 性能统计口径：用户摘要以真实 wall time 为主，worker_cumulative_time 明确标注为并发 worker 单图耗时累计，不再用 total_analysis_time / average_time_per_image 误导用户。",
+            "分析 worker 设置改为集中解析，low / medium / high / custom 会输出设置值、请求 worker 数、实际 worker 数和限制原因，并真正影响 ThreadPoolExecutor。",
+            "大图分析改为受控 working image 路径：保留原图尺寸和区域坐标回写，基础统计、颜色、人像和质量阶段不再对全部指标使用原始超大数组；噪点分数按 working image 像素尺度校正以保持结论稳定。",
+            "相似图特征提取对 JPEG 使用 Pillow draft 降低解码尺寸，继续复用原有感知哈希和相似组判断逻辑，不改变相似图结论风格。",
+            "修复相似图片组内对比窗口默认高度不足时每图“删除此图”按钮可能被遮挡的问题：图片区改为独立可滚动区域，底部“跳过本组 / 跳过所有剩余组 / 结束选择”操作区固定在窗口底部，并按屏幕尺寸限制默认窗口大小。",
+            "补齐分析与修复阶段耗时摘要：分析记录读取图片、基础统计、场景判断、人像/清晰度/噪声/色彩判断、cleanup candidate 与相似图检测耗时；修复记录生成方案、读取图片、执行修复步骤、候选评分/安全检查、保存输出和元数据保留耗时。",
+            "降低 Console 高频刷新开销：后台任务仍可记录完整状态，但 UI 文本框改为短延迟合并刷新，减少多线程分析/修复时 Tk 主线程被日志重绘拖慢。",
+            "新增批量性能审计：Console 在分析结束时输出 total_analysis_time、total_wall_time、total_worker_time、average_time_per_image、queue/wait、最慢图片 top 5、最慢阶段 top 5、相似图检测、UI 刷新与 Console 刷新耗时。",
+            "应用设置新增分析并发模式（自动/低/中/高/自定义 worker 数）与 GPU 加速选项（关闭/自动/开启）；GPU 后端检测为可选能力，未检测到 CuPy、OpenCV-CUDA 或 torch CUDA 时自动回退 CPU。",
+            "优化批量分析 UI 写回：单张完成时定点更新当前 Treeview 行，避免每张结果都重建整张缩略图列表，最终完成后再做一次稳定刷新。",
+            "批量结束时输出最慢图片、最慢阶段、总耗时与平均耗时，便于定位是图片读取、判断、相似检测、候选评分、保存或元数据写回造成瓶颈。",
+            "本轮仅做维护型小修，没有改变相似图算法、分析判断阈值、修复风格或安全清理规则。",
+        ],
+    },
     {
         "version": "1.1.4",
         "date": "2026-05-05",

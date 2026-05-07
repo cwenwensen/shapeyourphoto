@@ -261,7 +261,7 @@ class SimilarGroupDecisionDialog(tk.Toplevel):
         self.transient(parent.winfo_toplevel())
         self.grab_set()
         self.resizable(True, True)
-        self.minsize(860, 560)
+        self.minsize(900, 640)
         self.protocol("WM_DELETE_WINDOW", self._skip_all)
 
         self._groups = groups
@@ -278,14 +278,25 @@ class SimilarGroupDecisionDialog(tk.Toplevel):
         outer = ttk.Frame(self, padding=14)
         outer.pack(fill="both", expand=True)
         outer.columnconfigure(0, weight=1)
+        outer.columnconfigure(1, weight=0)
         outer.rowconfigure(3, weight=1)
 
         ttk.Label(outer, textvariable=self._title_var, style="PanelTitle.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(outer, textvariable=self._reason_var, wraplength=920).grid(row=1, column=0, sticky="ew", pady=(4, 8))
         ttk.Label(outer, textvariable=self._size_hint_var, foreground="#8a4a00").grid(row=2, column=0, sticky="w", pady=(0, 6))
 
-        self.grid_shell = ttk.Frame(outer)
-        self.grid_shell.grid(row=3, column=0, sticky="nsew")
+        self.grid_canvas = tk.Canvas(outer, highlightthickness=0, background="#fbfcfa")
+        self.grid_scrollbar = ttk.Scrollbar(outer, orient="vertical", command=self.grid_canvas.yview)
+        self.grid_canvas.configure(yscrollcommand=self.grid_scrollbar.set)
+        self.grid_canvas.grid(row=3, column=0, sticky="nsew")
+        self.grid_scrollbar.grid(row=3, column=1, sticky="ns")
+
+        self.grid_shell = ttk.Frame(self.grid_canvas)
+        self.grid_window_id = self.grid_canvas.create_window((0, 0), window=self.grid_shell, anchor="nw")
+        self.grid_shell.bind("<Configure>", self._on_grid_inner_configure)
+        self.grid_canvas.bind("<Configure>", self._on_grid_canvas_configure)
+        self._bind_grid_mousewheel(self.grid_canvas)
+        self._bind_grid_mousewheel(self.grid_shell)
 
         nav_row = ttk.Frame(outer)
         nav_row.grid(row=4, column=0, sticky="ew", pady=(10, 0))
@@ -296,20 +307,36 @@ class SimilarGroupDecisionDialog(tk.Toplevel):
         self.skip_button = ttk.Button(nav_row, text="跳过本组", command=self._skip_group)
         self.skip_button.pack(side="right")
         ttk.Button(nav_row, text="跳过所有剩余组", command=self._skip_all).pack(side="right", padx=6)
+        ttk.Button(nav_row, text="结束选择", command=self._skip_all).pack(side="right", padx=(0, 6))
 
         self.bind("<Configure>", lambda _event: self._update_size_hint())
         self._render_group()
-        self._fit_to_screen(1120, 760)
+        self._fit_to_screen(1180, 900)
 
     def _fit_to_screen(self, preferred_width: int, preferred_height: int) -> None:
         self.update_idletasks()
         screen_width = max(900, self.winfo_screenwidth())
-        screen_height = max(620, self.winfo_screenheight())
-        width = min(preferred_width, max(860, screen_width - 120))
-        height = min(preferred_height, max(560, screen_height - 140))
+        screen_height = max(680, self.winfo_screenheight())
+        width = min(preferred_width, max(900, screen_width - 80))
+        height = min(preferred_height, max(640, screen_height - 80))
         x = max(0, (screen_width - width) // 2)
         y = max(0, (screen_height - height) // 2)
         self.geometry(f"{width}x{height}+{x}+{y}")
+
+    def _bind_grid_mousewheel(self, widget: tk.Widget) -> None:
+        widget.bind("<MouseWheel>", self._on_grid_mousewheel, add="+")
+
+    def _on_grid_inner_configure(self, _event=None) -> None:
+        self.grid_canvas.configure(scrollregion=self.grid_canvas.bbox("all"))
+
+    def _on_grid_canvas_configure(self, event) -> None:
+        self.grid_canvas.itemconfigure(self.grid_window_id, width=max(1, event.width))
+
+    def _on_grid_mousewheel(self, event) -> str:
+        if self.grid_canvas.winfo_exists() and self.grid_canvas.winfo_ismapped():
+            delta = -1 if event.delta > 0 else 1
+            self.grid_canvas.yview_scroll(delta * 3, "units")
+        return "break"
 
     def _active_group(self) -> SimilarImageGroup | None:
         while self._group_index < len(self._groups):
@@ -349,18 +376,28 @@ class SimilarGroupDecisionDialog(tk.Toplevel):
         self.prev_button.configure(state="normal" if has_pages and self._page_start > 0 else "disabled")
         self.next_button.configure(state="normal" if has_pages and self._page_start + max_visible < len(group.paths) else "disabled")
         self.skip_button.configure(text="结束所有选择" if self._group_index >= len(self._groups) - 1 else "跳过本组")
+        self.grid_canvas.yview_moveto(0)
+        self.after_idle(lambda: self.grid_canvas.configure(scrollregion=self.grid_canvas.bbox("all")))
         self._update_size_hint()
 
     def _build_image_card(self, parent: tk.Widget, group: SimilarImageGroup, path: Path) -> ttk.Frame:
         card = ttk.Frame(parent, padding=10, relief="solid")
         card.columnconfigure(0, weight=1)
-        thumb = self._build_preview(path, (430, 290))
+        self._bind_grid_mousewheel(card)
+        thumb = self._build_preview(path, (360, 220))
         if thumb is not None:
             self._thumbs.append(thumb)
-            ttk.Label(card, image=thumb).grid(row=0, column=0, sticky="n")
-        ttk.Label(card, text=path.name, font=("Microsoft YaHei UI", 10, "bold"), wraplength=420).grid(row=1, column=0, sticky="w", pady=(8, 2))
-        ttk.Label(card, text=self._analysis_summary(path), wraplength=420).grid(row=2, column=0, sticky="w")
-        ttk.Button(card, text="删除此图", command=lambda p=path, g=group: self._delete_path(p, g)).grid(row=3, column=0, sticky="ew", pady=(8, 0))
+            image_label = ttk.Label(card, image=thumb)
+            image_label.grid(row=0, column=0, sticky="n")
+            self._bind_grid_mousewheel(image_label)
+        name_label = ttk.Label(card, text=path.name, font=("Microsoft YaHei UI", 10, "bold"), wraplength=350)
+        name_label.grid(row=1, column=0, sticky="w", pady=(8, 2))
+        self._bind_grid_mousewheel(name_label)
+        summary_label = ttk.Label(card, text=self._analysis_summary(path), wraplength=350)
+        summary_label.grid(row=2, column=0, sticky="w")
+        self._bind_grid_mousewheel(summary_label)
+        delete_button = ttk.Button(card, text="删除此图", command=lambda p=path, g=group: self._delete_path(p, g))
+        delete_button.grid(row=3, column=0, sticky="ew", pady=(8, 0))
         return card
 
     def _analysis_summary(self, path: Path) -> str:
@@ -404,8 +441,8 @@ class SimilarGroupDecisionDialog(tk.Toplevel):
         self.destroy()
 
     def _update_size_hint(self) -> None:
-        if self.winfo_width() < 940 or self.winfo_height() < 620:
-            self._size_hint_var.set("当前窗口空间偏小，图片预览可能不够清楚。请放大窗口，或跳过本组。")
+        if self.winfo_width() < 980 or self.winfo_height() < 760:
+            self._size_hint_var.set("当前窗口空间偏小，图片区域可滚动；删除按钮和底部操作栏会保留在可达位置。")
         else:
             self._size_hint_var.set("")
 

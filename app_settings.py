@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -14,6 +15,32 @@ SCAN_MODE_ASK = "ask"
 SCAN_MODE_ALL = "all"
 SCAN_MODE_CURRENT_ONLY = "current_only"
 SCAN_MODE_SUBDIRS_ONLY = "subdirs_only"
+
+ANALYSIS_CONCURRENCY_AUTO = "auto"
+ANALYSIS_CONCURRENCY_LOW = "low"
+ANALYSIS_CONCURRENCY_MEDIUM = "medium"
+ANALYSIS_CONCURRENCY_HIGH = "high"
+ANALYSIS_CONCURRENCY_CUSTOM = "custom"
+
+ANALYSIS_CONCURRENCY_OPTIONS: list[tuple[str, str]] = [
+    (ANALYSIS_CONCURRENCY_AUTO, "自动"),
+    (ANALYSIS_CONCURRENCY_LOW, "低"),
+    (ANALYSIS_CONCURRENCY_MEDIUM, "中"),
+    (ANALYSIS_CONCURRENCY_HIGH, "高"),
+    (ANALYSIS_CONCURRENCY_CUSTOM, "自定义 worker 数"),
+]
+ANALYSIS_CONCURRENCY_LABELS = {value: label for value, label in ANALYSIS_CONCURRENCY_OPTIONS}
+
+GPU_ACCELERATION_OFF = "off"
+GPU_ACCELERATION_AUTO = "auto"
+GPU_ACCELERATION_ON = "on"
+
+GPU_ACCELERATION_OPTIONS: list[tuple[str, str]] = [
+    (GPU_ACCELERATION_OFF, "关闭"),
+    (GPU_ACCELERATION_AUTO, "自动"),
+    (GPU_ACCELERATION_ON, "开启"),
+]
+GPU_ACCELERATION_LABELS = {value: label for value, label in GPU_ACCELERATION_OPTIONS}
 
 SCAN_MODE_OPTIONS: list[tuple[str, str]] = [
     (SCAN_MODE_ASK, "每次询问"),
@@ -85,11 +112,81 @@ def normalize_repair_summary_filter(filter_id: str | None) -> str:
     return normalized if normalized in allowed else REPAIR_SUMMARY_FILTER_ALL
 
 
+def normalize_analysis_concurrency_mode(mode: str | None) -> str:
+    normalized = str(mode or ANALYSIS_CONCURRENCY_AUTO).strip().lower()
+    allowed = {value for value, _label in ANALYSIS_CONCURRENCY_OPTIONS}
+    return normalized if normalized in allowed else ANALYSIS_CONCURRENCY_AUTO
+
+
+def normalize_analysis_custom_workers(value: object) -> int:
+    try:
+        workers = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(32, workers))
+
+
+@dataclass(frozen=True)
+class AnalysisWorkerPlan:
+    mode: str
+    requested_workers: int
+    actual_workers: int
+    reason: str = ""
+
+
+def resolve_analysis_worker_plan(
+    total_images: int,
+    mode: str | None,
+    custom_workers: object = 0,
+    *,
+    cpu_count: int | None = None,
+) -> AnalysisWorkerPlan:
+    total = max(1, int(total_images or 1))
+    cpus = max(1, int(cpu_count or os.cpu_count() or 4))
+    normalized_mode = normalize_analysis_concurrency_mode(mode)
+    notes: list[str] = []
+
+    if normalized_mode == ANALYSIS_CONCURRENCY_LOW:
+        requested = max(1, min(2, cpus // 2 or 1))
+    elif normalized_mode == ANALYSIS_CONCURRENCY_MEDIUM:
+        requested = max(1, min(6, max(2, cpus // 2)))
+    elif normalized_mode == ANALYSIS_CONCURRENCY_HIGH:
+        requested = max(1, min(16, max(2, cpus + 2)))
+    elif normalized_mode == ANALYSIS_CONCURRENCY_CUSTOM:
+        custom = normalize_analysis_custom_workers(custom_workers)
+        if custom <= 0:
+            requested = max(1, min(12, max(2, cpus)))
+            notes.append("custom worker value is empty; using auto default")
+        else:
+            requested = custom
+    else:
+        requested = max(1, min(12, max(2, cpus)))
+
+    actual = min(requested, total)
+    if actual < requested:
+        notes.append(f"limited by image count ({total})")
+    return AnalysisWorkerPlan(
+        mode=normalized_mode,
+        requested_workers=requested,
+        actual_workers=max(1, actual),
+        reason="; ".join(notes),
+    )
+
+
+def normalize_gpu_acceleration_mode(mode: str | None) -> str:
+    normalized = str(mode or GPU_ACCELERATION_OFF).strip().lower()
+    allowed = {value for value, _label in GPU_ACCELERATION_OPTIONS}
+    return normalized if normalized in allowed else GPU_ACCELERATION_OFF
+
+
 @dataclass
 class AppSettings:
     scan_ignore_prefixes: list[str] = field(default_factory=lambda: list(DEFAULT_SCAN_IGNORE_PREFIXES))
     default_scan_mode: str = SCAN_MODE_ASK
     repair_summary_default_filter: str = REPAIR_SUMMARY_FILTER_ALL
+    analysis_concurrency_mode: str = ANALYSIS_CONCURRENCY_AUTO
+    analysis_custom_workers: int = 0
+    gpu_acceleration_mode: str = GPU_ACCELERATION_OFF
 
 
 def default_app_settings() -> AppSettings:
@@ -105,6 +202,11 @@ def validate_settings_payload(payload: object) -> AppSettings:
         repair_summary_default_filter=normalize_repair_summary_filter(
             payload.get("repair_summary_default_filter", REPAIR_SUMMARY_FILTER_ALL)
         ),
+        analysis_concurrency_mode=normalize_analysis_concurrency_mode(
+            payload.get("analysis_concurrency_mode", ANALYSIS_CONCURRENCY_AUTO)
+        ),
+        analysis_custom_workers=normalize_analysis_custom_workers(payload.get("analysis_custom_workers", 0)),
+        gpu_acceleration_mode=normalize_gpu_acceleration_mode(payload.get("gpu_acceleration_mode", GPU_ACCELERATION_OFF)),
     )
 
 

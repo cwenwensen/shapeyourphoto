@@ -7,6 +7,7 @@ from itertools import combinations
 from pathlib import Path
 import os
 import re
+import time
 
 import numpy as np
 from PIL import Image, ImageOps
@@ -81,24 +82,37 @@ def detect_similar_groups(
     results: dict[Path, AnalysisResult],
     *,
     max_workers: int | None = None,
+    perf_timings: dict[str, float] | None = None,
 ) -> list[SimilarImageGroup]:
+    similar_started_at = time.perf_counter()
     ordered_paths = [path for path in paths if path.exists() and path in results]
     if len(ordered_paths) < 2:
         return []
 
+    started_at = time.perf_counter()
     features = _extract_features_parallel(ordered_paths, max_workers=max_workers)
+    _add_timing(perf_timings, "similar_feature_extract", started_at)
     if len(features) < 2:
+        _add_timing(perf_timings, "similar_detection", similar_started_at)
         return []
 
     feature_map = {feature.path: feature for feature in features}
+    started_at = time.perf_counter()
+    candidate_pairs = _candidate_pairs(features)
+    _add_timing(perf_timings, "similar_pair_build", started_at)
+
     matches: list[_PairMatch] = []
-    for left, right in _candidate_pairs(features):
+    started_at = time.perf_counter()
+    for left, right in candidate_pairs:
         match = _compare_features(feature_map[left], feature_map[right], results)
         if match is not None:
             matches.append(match)
+    _add_timing(perf_timings, "similar_pair_compare", started_at)
     if not matches:
+        _add_timing(perf_timings, "similar_detection", similar_started_at)
         return []
 
+    started_at = time.perf_counter()
     union_find = _UnionFind([feature.path for feature in features])
     for match in matches:
         union_find.union(match.left, match.right)
@@ -140,7 +154,15 @@ def detect_similar_groups(
         )
         group_id += 1
 
+    _add_timing(perf_timings, "similar_group_build", started_at)
+    _add_timing(perf_timings, "similar_detection", similar_started_at)
     return groups
+
+
+def _add_timing(perf_timings: dict[str, float] | None, key: str, started_at: float) -> None:
+    if perf_timings is None:
+        return
+    perf_timings[key] = perf_timings.get(key, 0.0) + (time.perf_counter() - started_at) * 1000.0
 
 
 def _extract_features_parallel(paths: list[Path], max_workers: int | None = None) -> list[_ImageFeature]:
@@ -162,6 +184,10 @@ def _extract_features_parallel(paths: list[Path], max_workers: int | None = None
 def _extract_feature(path: Path) -> _ImageFeature | None:
     with Image.open(path) as raw:
         exif_time = _read_capture_time(raw)
+        try:
+            raw.draft("RGB", (512, 512))
+        except Exception:
+            pass
         image = ImageOps.exif_transpose(raw).convert("RGB")
 
     width, height = image.size

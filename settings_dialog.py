@@ -4,15 +4,21 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from app_settings import (
+    ANALYSIS_CONCURRENCY_OPTIONS,
     AppSettings,
     DEFAULT_SCAN_IGNORE_PREFIXES,
+    GPU_ACCELERATION_OPTIONS,
     REPAIR_SUMMARY_FILTER_OPTIONS,
     SCAN_MODE_OPTIONS,
+    normalize_analysis_concurrency_mode,
+    normalize_analysis_custom_workers,
     normalize_default_scan_mode,
+    normalize_gpu_acceleration_mode,
     normalize_repair_summary_filter,
     normalize_scan_ignore_prefixes,
     validate_settings_payload,
 )
+from gpu_accel import detect_gpu_backend
 from window_layout import center_window
 
 
@@ -31,6 +37,10 @@ class AppSettingsDialog(tk.Toplevel):
         self._scan_mode_label_to_value = {label: value for value, label in SCAN_MODE_OPTIONS}
         self._summary_filter_value_to_label = dict(REPAIR_SUMMARY_FILTER_OPTIONS)
         self._summary_filter_label_to_value = {label: value for value, label in REPAIR_SUMMARY_FILTER_OPTIONS}
+        self._concurrency_value_to_label = dict(ANALYSIS_CONCURRENCY_OPTIONS)
+        self._concurrency_label_to_value = {label: value for value, label in ANALYSIS_CONCURRENCY_OPTIONS}
+        self._gpu_value_to_label = dict(GPU_ACCELERATION_OPTIONS)
+        self._gpu_label_to_value = {label: value for value, label in GPU_ACCELERATION_OPTIONS}
 
         outer = ttk.Frame(self, padding=16)
         outer.pack(fill="both", expand=True)
@@ -120,6 +130,67 @@ class AppSettingsDialog(tk.Toplevel):
             justify="left",
         ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(18, 0))
 
+        performance_tab = ttk.Frame(notebook, padding=14)
+        performance_tab.columnconfigure(1, weight=1)
+        notebook.add(performance_tab, text="性能")
+
+        ttk.Label(performance_tab, text="分析并发", font=("Microsoft YaHei UI", 11, "bold")).grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(
+            performance_tab,
+            text="控制批量分析 worker 数。自动模式会按 CPU 核心数和任务数量选择安全值；大图很多时建议先使用自动或中等。",
+            wraplength=680,
+            justify="left",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 10))
+
+        ttk.Label(performance_tab, text="并发模式：").grid(row=2, column=0, sticky="w")
+        self.concurrency_var = tk.StringVar(value=self._concurrency_value_to_label[normalized.analysis_concurrency_mode])
+        ttk.Combobox(
+            performance_tab,
+            textvariable=self.concurrency_var,
+            state="readonly",
+            values=[label for _value, label in ANALYSIS_CONCURRENCY_OPTIONS],
+            width=28,
+        ).grid(row=2, column=1, sticky="w")
+
+        ttk.Label(performance_tab, text="自定义 worker 数：").grid(row=3, column=0, sticky="w", pady=(12, 0))
+        self.custom_workers_var = tk.StringVar(value=str(normalized.analysis_custom_workers or ""))
+        ttk.Spinbox(
+            performance_tab,
+            from_=1,
+            to=32,
+            textvariable=self.custom_workers_var,
+            width=10,
+        ).grid(row=3, column=1, sticky="w", pady=(12, 0))
+
+        ttk.Label(performance_tab, text="GPU 加速", font=("Microsoft YaHei UI", 11, "bold")).grid(row=4, column=0, columnspan=2, sticky="w", pady=(22, 0))
+        ttk.Label(
+            performance_tab,
+            text="GPU 是可选能力；未检测到可用后端时会自动回退 CPU，不会影响启动和现有分析流程。",
+            wraplength=680,
+            justify="left",
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 10))
+
+        ttk.Label(performance_tab, text="GPU 加速：").grid(row=6, column=0, sticky="w")
+        self.gpu_mode_var = tk.StringVar(value=self._gpu_value_to_label[normalized.gpu_acceleration_mode])
+        ttk.Combobox(
+            performance_tab,
+            textvariable=self.gpu_mode_var,
+            state="readonly",
+            values=[label for _value, label in GPU_ACCELERATION_OPTIONS],
+            width=28,
+        ).grid(row=6, column=1, sticky="w")
+
+        backend_status = detect_gpu_backend()
+        backend_label = backend_status.backend_name if backend_status.available else "未检测到"
+        ttk.Label(performance_tab, text="可用后端：").grid(row=7, column=0, sticky="w", pady=(12, 0))
+        ttk.Label(performance_tab, text=backend_label).grid(row=7, column=1, sticky="w", pady=(12, 0))
+        ttk.Label(
+            performance_tab,
+            text=backend_status.reason,
+            wraplength=680,
+            justify="left",
+        ).grid(row=8, column=0, columnspan=2, sticky="w", pady=(8, 0))
+
         buttons = ttk.Frame(outer)
         buttons.grid(row=2, column=0, sticky="ew", pady=(14, 0))
         ttk.Button(buttons, text="取消", command=self._cancel).pack(side="right")
@@ -172,10 +243,16 @@ class AppSettingsDialog(tk.Toplevel):
 
         scan_mode = normalize_default_scan_mode(self._scan_mode_label_to_value.get(self.scan_mode_var.get()))
         summary_filter = normalize_repair_summary_filter(self._summary_filter_label_to_value.get(self.summary_filter_var.get()))
+        concurrency_mode = normalize_analysis_concurrency_mode(self._concurrency_label_to_value.get(self.concurrency_var.get()))
+        custom_workers = normalize_analysis_custom_workers(self.custom_workers_var.get())
+        gpu_mode = normalize_gpu_acceleration_mode(self._gpu_label_to_value.get(self.gpu_mode_var.get()))
         self.result = AppSettings(
             scan_ignore_prefixes=prefixes,
             default_scan_mode=scan_mode,
             repair_summary_default_filter=summary_filter,
+            analysis_concurrency_mode=concurrency_mode,
+            analysis_custom_workers=custom_workers,
+            gpu_acceleration_mode=gpu_mode,
         )
         self.destroy()
 
