@@ -21,6 +21,7 @@ outputs/
 exports/
 user_data/
 originals/
+benchmark_reports/
 
 *.db
 *.sqlite
@@ -42,3 +43,5 @@ _debug/
 /test/*
 !/test/README.md
 !/test/.gitkeep
+!/test/manifest.example.json
+!/test/EXPECTED.example.md

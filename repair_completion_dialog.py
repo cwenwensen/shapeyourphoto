@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from tkinter import ttk
 
 from app_settings import REPAIR_SUMMARY_FILTER_ALL, REPAIR_SUMMARY_FILTER_OPTIONS, normalize_repair_summary_filter
-from window_layout import center_window
+from window_layout import bind_minimum_size_notice, center_window
 
 
 @dataclass
@@ -40,11 +40,11 @@ class RepairCompletionDialog(tk.Toplevel):
         self._filter_to_label = dict(REPAIR_SUMMARY_FILTER_OPTIONS)
         normalized_filter = normalize_repair_summary_filter(default_filter)
         self.filter_var = tk.StringVar(value=self._filter_to_label[normalized_filter])
+        self._size_notice_var = tk.StringVar(value="")
 
         outer = ttk.Frame(self, padding=14)
         outer.pack(fill="both", expand=True)
         outer.columnconfigure(0, weight=1)
-        outer.rowconfigure(1, weight=1)
         outer.rowconfigure(2, weight=1)
 
         summary_frame = ttk.LabelFrame(outer, text="摘要", padding=10)
@@ -123,10 +123,12 @@ class RepairCompletionDialog(tk.Toplevel):
 
         button_row = ttk.Frame(outer)
         button_row.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+        ttk.Label(button_row, textvariable=self._size_notice_var).pack(side="left")
         ttk.Button(button_row, text="关闭", command=self.destroy).pack(side="right")
 
         self._item_to_entry: dict[str, RepairCompletionEntry] = {}
         self._populate_tree()
+        bind_minimum_size_notice(self, self._size_notice_var, 920, 640)
         center_window(self, 1180, 820)
 
     def _current_filter(self) -> str:

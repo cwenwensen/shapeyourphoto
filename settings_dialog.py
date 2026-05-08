@@ -19,7 +19,7 @@ from app_settings import (
     validate_settings_payload,
 )
 from gpu_accel import detect_gpu_backend
-from window_layout import center_window
+from window_layout import bind_minimum_size_notice, center_window
 
 
 class AppSettingsDialog(tk.Toplevel):
@@ -31,6 +31,7 @@ class AppSettingsDialog(tk.Toplevel):
         self.resizable(True, True)
         self.minsize(760, 560)
         self.result: AppSettings | None = None
+        self._size_notice_var = tk.StringVar(value="")
 
         normalized = validate_settings_payload(settings.__dict__)
         self._scan_mode_value_to_label = dict(SCAN_MODE_OPTIONS)
@@ -193,10 +194,12 @@ class AppSettingsDialog(tk.Toplevel):
 
         buttons = ttk.Frame(outer)
         buttons.grid(row=2, column=0, sticky="ew", pady=(14, 0))
+        ttk.Label(buttons, textvariable=self._size_notice_var).pack(side="left")
         ttk.Button(buttons, text="取消", command=self._cancel).pack(side="right")
         ttk.Button(buttons, text="保存设置", command=self._confirm).pack(side="right", padx=(0, 8))
 
         self.protocol("WM_DELETE_WINDOW", self._cancel)
+        bind_minimum_size_notice(self, self._size_notice_var, 760, 560)
         center_window(self, 820, 620)
 
     def _current_prefixes(self) -> list[str]:

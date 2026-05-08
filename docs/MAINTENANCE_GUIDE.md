@@ -1,186 +1,142 @@
 # Maintenance Guide
 
-## 维护原则
+本文是 1.1.6 当前维护规则。旧版本附录保留在 `docs/updates/`；如旧说明与本文冲突，以本文和当前代码为准。
 
-1. 优先恢复和保持稳定可用性。
-2. 不大改架构，不换技术栈，不引入重依赖。
-3. 先看代码、运行结果和 diff，再看 handover。
-4. 修复必须可验证，不能只停留在解释层面。
+## 基本原则
 
-## 文本编码与乱码排查
+1. 先核代码，再改文档或实现。
+2. 小步修改、可验证，不借维护任务重构核心算法。
+3. 保留用户数据安全边界：不上传图片、不永久删除、不暗改输出规则。
+4. 功能变化必须同步文档、CHANGELOG 和 `app_metadata.py`。
+5. 不提交本地样张、缓存、patch、`__pycache__`、调试输出或临时文件。
 
-- 如果应用内分析结果出现乱码，优先怀疑源码里的用户可见文案常量已经损坏，而不只是查看器编码设置异常。
-- 优先用 `python` 以 `utf-8` 读取文件内容确认真实文本，不要只依赖 PowerShell 控制台显示，因为控制台代码页可能把正常中文显示成乱码或问号。
-- `analyzer.py` 已增加问题文案兜底回退：当 `Issue.label`、`Issue.detail` 或 `Issue.suggestion` 检测到疑似乱码时，会按 `issue.code` 回退到可读描述，避免异常文本直接进入 UI。
-- 修复乱码时要同时处理两层：
-  - 第一层是把损坏的源码常量改回正常中文；
-  - 第二层是保留兜底回退，避免后续新增问题类型时再次把损坏文案直接暴露给用户。
-- 如果必须通过脚本批量改写中文常量，优先使用 UTF-8 安全的编辑方式；当当前终端代码页不可靠时，可用 Unicode 转义写回源码，避免中文在脚本输入阶段被替换成 `?`。
+## 启动链路保护
 
-## 方向归一与 EXIF
+- 日常启动入口是 `start.bat` / `start_app.bat` / `app.pyw` / `app.py`。
+- 启动脚本必须短、快、稳。
+- 不得把 `pip install`、benchmark、扫描、清理或耗时检查放入日常启动。
+- 依赖安装只走 `setup_deps.bat` 或明确的人工命令。
 
-- 修复链路读取图片时已经通过 `ImageOps.exif_transpose` 把像素方向转正，因此保存输出时不能再原样写回旧的 `Orientation` 标签。
-- JPEG / WebP 保存前应把 EXIF `Orientation` 归一为 `1`，否则会出现“像素已转正，但查看器又按旧标签再次旋转”的双重旋转问题。
-- 回归验证时至少检查三项：
-  - 原图 `size` 与 `Orientation`
-  - 修复输出的物理尺寸是否已经转正
-  - 修复输出的 `Orientation` 是否为 `1`
+## Tk 主线程规则
 
-## 高风险修改点
+- Tk 控件只能在主线程更新。
+- 后台线程不得直接写 Treeview、Text、Label、Progressbar 或弹窗。
+- 目录扫描、批量分析、批量修复和相似检测应通过回调/队列/`root.after()` 回主线程。
+- Console Text 刷新必须保持合并刷新，避免每条日志重绘整块内容。
+- 分析/修复进度窗口只显示固定高度阶段摘要；长阶段详情和性能细节进入 Console，不得撑开弹窗内部布局。
+- 进度窗口只允许一个明确取消入口，关闭叉号与按钮应走同一取消路径。
 
-### 启动链路
+## UI 主类拆分规则
 
-- `start.bat`
-- `start_app.bat`
-- `app.py`
-- `app.pyw`
+- `ui_app.py` 只负责主窗口状态、控件装配和高层协调。
+- 扫描/导入、分析任务、修复任务、主列表、Console/perf、cleanup/similar 复核分别维护在 `ui_scan_actions.py`、`ui_analysis_actions.py`、`ui_repair_actions.py`、`ui_file_list.py`、`ui_task_console.py`、`ui_review_actions.py`。
+- 新增 UI 行为时优先放入对应 mixin；只有布局装配、菜单 wiring 和根窗口生命周期适合留在 `ui_app.py`。
+- mixin 模块不得 import `ui_app.py`，共享常量放在 `ui_constants.py`，避免循环依赖。
+- 拆分 UI 代码时必须保持后台回调回主线程、run_id/cancel_event 防旧写回和 Console 合并刷新规则。
 
-注意：
+## 后台线程、run_id 与取消规则
 
-- 日常启动不得自动安装依赖
-- 启动脚本应尽量短、快、稳
+- 每轮批量分析都应有唯一 run_id。
+- 取消分析通过 cancel_event 表达。
+- 后台任务写回结果、进度、cleanup prompt、similar prompt 或最终摘要前必须校验 run_id 和 cancel_event。
+- 取消后保留文件列表，清空本轮目标已写入的结果、错误、进度、cleanup 标记和相似组标记。
+- 已取消 worker 可以完成 CPU 工作，但结果必须丢弃。
 
-### 主界面链路
+## perf_timings / perf_notes 规则
 
-- `ui_app.py`
-- `drag_drop.py`
-- `progress_dialog.py`
-- `debug_open_dialog.py`
+- 分析和修复耗时统一写入 `perf_timings`。
+- 面向维护者的轻量瓶颈提示写入 `perf_notes`。
+- 不要新建平行计时体系。
+- 分析建议记录读取、EXIF 转正、working image、基础统计、曝光、锐度、色彩、噪声、人像、cleanup candidate、相似图检测等阶段。
+- 修复建议记录 planner、读取、各 op、候选生成/评分、安全检查、保存输出和元数据保留。
+- Console 以 wall time 为主；worker cumulative 是并发 worker 累计工作量，不是用户等待时间。
 
-注意：
+## EXIF Orientation 归一
 
-- Tk 的 UI 更新必须回到主线程
-- 目录扫描、分析、修复都要避免阻塞主线程
-- 拖拽是 Windows 相关逻辑，修改后必须重点验证
-- 调试模式如涉及打开文件，应避免阻塞主界面
+- 读取图片时使用 `ImageOps.exif_transpose` 将像素方向转正。
+- 保存 JPEG/WebP 前将 EXIF Orientation 归一为 `1`。
+- 回归时检查原图显示方向、输出物理尺寸和输出 Orientation。
 
-### 图像修复链路
+## cleanup candidate 安全删除规则
 
-- `analyzer.py`
-- `repair_planner.py`
-- `repair_ops.py`
-- `repair_engine.py`
+- cleanup candidate 是建议，不是自动删除命令。
+- UI 默认不勾选候选。
+- 删除前必须二次确认。
+- 删除必须走 `safe_cleanup_paths()`。
+- 优先移入系统回收站；失败时移入项目内 `_cleanup_candidates` 隔离目录。
+- 不得在 cleanup 或 similar 窗口中直接 `unlink()` 或永久删除。
 
-注意：
+## 修复目标集合规则
 
-- 视觉判断不能只靠单一全局统计
-- 修复前后朝向必须一致
-- 输出后 EXIF 与像素朝向要匹配
-- 元数据保留要谨慎
+- “修复当前”只读取当前焦点图片。
+- “批量修复勾选”优先使用真正的 Treeview 多选集合；只有当多选数量多于 1 张时才视为批量多选。
+- 没有真正多选时，批量入口回退到勾选集合；单个蓝色高亮行不得覆盖勾选集合。
+- 批量修复必须逐图调用 `repair_engine.repair_image_file()`，并让 `repair_planner.build_repair_plan()` 基于该图自己的 `AnalysisResult` 生成 `method_ids`、`op_strengths` 和 policy notes。
+- 不得把当前焦点图的推荐方法、参数或力度套用到整批图片。
+- 修复完成详情的成功、跳过、失败、候选回退/no-op 统计必须来自真实批量目标结果。
+
+## 弹窗尺寸规则
+
+- 分析/修复进度、扫描四选项、修复完成详情、cleanup candidate、相似图列表、相似图组内对比和设置窗口都应有明确 `minsize()` 或固定/滚动策略。
+- 底部关键按钮应放在固定按钮区，内容过长时滚动内容区，不压缩按钮区。
+- 可缩放窗口达到最小尺寸附近时，统一显示“已达到最小可用窗口大小”。
+- 二级窗口默认尺寸必须受屏幕可用区域限制，不能为了展示完整内容超出屏幕。
+
+## 相似图维护规则
+
+- 相似图只作为分析批次附加结果。
+- `SimilarImageGroup` 不写回单张 `AnalysisResult.issues`、`scene_type`、人像字段、修复建议或 cleanup candidates。
+- 同一张图可以同时出现在 cleanup candidate 和 similar group 中；UI 只能提示，不自动处理。
+- 相似图删除复用全局安全清理。
+
+## 设置与扫描规则
+
+- 应用设置统一由 `app_settings.py` 定义、校验和保存。
+- UI 设置统一由 `settings_dialog.py` 管理，不新增零散菜单项。
+- 扫描默认至少忽略 `_repair` 前缀，任意层级以 `_repair` 开头的目录都跳过。
+- 扫描结果应写入 Console 简报和“最近扫描摘要”明细。
+- 修改扫描逻辑时同时验证按钮扫描、拖拽文件夹、补扫、默认扫描模式和忽略前缀。
+
+## GPU fallback 规则
+
+- GPU 是可选检测，不是硬依赖。
+- 不得把 CuPy、OpenCV-CUDA、torch CUDA、CUDA runtime 等加入必需依赖。
+- 未检测到 GPU 或可选依赖时，应用必须正常启动并回退 CPU。
+- 未证明真实 offload 收益前，不要声称 GPU 已参与默认分析。
+
+## `/test` 本地样张规则
+
+- `test/` 用于本地真实图片 benchmark 和回归。
+- 图片文件由 `.gitignore` 忽略，不得提交。
+- 真实 `test/manifest.json` 也默认忽略，因为可能包含用户图片文件名。
+- 可提交的模板是 `test/manifest.example.json`。
+- `benchmark_test_images.py` 必须允许 `test/` 为空时安全跳过。
+- benchmark 摘要应记录 wall time、worker cumulative、queue/wait、慢图、慢阶段、相似检测、问题图和 cleanup candidate 数量。
+- benchmark 报告写入被忽略的 `benchmark_reports/`，不得提交报告文件。
+
+## 文档更新规则
+
+- 不得删除 `docs/`、`docs/technical/`、`docs/updates/`。
+- 不得清空正式文档。
+- 过时内容应修订、迁移、标注历史上下文或指向当前说明。
+- 新增模块或职责变化：更新 `MODULE_REFERENCE.md`。
+- UI 流程变化：更新 `UI_AND_WORKFLOWS.md`。
+- 技术链路变化：更新或新增 `docs/technical/` 专题。
+- 版本升级：更新 `CHANGELOG.md`、`app_metadata.py` 和 `docs/updates/<version>.md`。
 
 ## 推荐验证顺序
 
-1. 双击 [start.bat](/E:/aitools/shapeyourphoto/start.bat) 能快速启动
-2. 选择单张图片能进入等待列表
-3. 选择目录能完成扫描，不假死
-4. 拖拽图片能入列
-5. 单图分析进度能真实推进
-6. 批量分析进度能真实推进
-7. 修复弹窗底部按钮完整可见
-8. 修复输出方向与原图显示方向一致
-9. 修复结果视觉上没有明显副作用
-10. 调试模式关闭时，修复流程与原先一致
-11. 调试模式开启时，只弹出本轮成功修复的前后对比打开窗口
+1. `python -m compileall -q .`
+2. 静态检查 `start.bat` / `start_app.bat` 未加入依赖安装或耗时逻辑。
+3. 搜索旧入口描述：`single_image_window`、孤立“去噪当前”、普通 `messagebox` 长修复详情。
+4. 检查文档是否存在明显乱码。
+5. 检查 `git status --short`，确认没有本地样张、`__pycache__`、patch、tmp 或 debug 输出进入版本控制。
 
-## 修改文档的要求
+## 高风险修改点
 
-- 功能变化后，应同步更新 `docs/`
-- 版本变化后，应同步更新 [CHANGELOG.md](/E:/aitools/shapeyourphoto/CHANGELOG.md) 和 [app_metadata.py](/E:/aitools/shapeyourphoto/app_metadata.py)
-- 不要留下临时 handover 垃圾文档
-
-## 1.1.5 Maintenance Addendum
-
-### 性能与 Console 边界
-
-- 批量分析和批量修复继续使用受控线程池；不要把结果收集改回按提交顺序逐个等待。
-- Tk 更新必须继续回主线程，但 Console 文本框不应每条日志都重绘整块内容；应保留合并刷新，避免后台 worker 的日志吞掉并发收益。
-- `perf_timings` 是正式性能记录入口。新增阶段耗时时应复用它，不要另建平行计时体系。
-- Console 只输出用户可理解的阶段摘要、总耗时、平均耗时、最慢图片和最慢阶段；内部阈值、评分公式和过细算法细节留在代码或 debug 说明中。
-- 批量分析完成摘要应保留 `total_wall_time`、`total_worker_time`、`queue/wait`、`similar_detection`、`UI_update`、`console_flush` 和 top slow stages；这是定位低 CPU 利用率的第一入口。
-- 主列表单张结果更新应优先定点更新 Treeview 行，避免每完成一张都重建整张缩略图列表；需要稳定排序时在批次完成后统一刷新。
-- GPU 加速设置必须保持可选：检测可选后端失败时不得影响启动，不得把 CUDA/CuPy/OpenCV-CUDA/torch 变成必需依赖，不得为了 GPU 把大图对象跨进程或跨设备来回搬运。
-
-### 相似组内对比窗口边界
-
-- 底部全局按钮区必须固定在窗口底部，图片区只能滚动或分页，不能把底部按钮挤出可视范围。
-- 每张图的“删除此图”按钮必须随卡片内容保持可达；不能依赖用户手动拉大窗口才能看到。
-- 默认窗口尺寸要按屏幕限制裁剪，不能超出屏幕。
-- 除非改动相似图算法，不要重复跑 `DSC_2621.JPG` / `DSC_2622.JPG` / `DSC_2623.JPG` 等旧样张大规模回归。
-## 1.1.4 Maintenance Addendum
-
-### 分析器维护边界
-
-- `analyzer.py` 现已变成兼容薄封装；新增分析逻辑优先落到 `analysis/` 包，而不是把大段代码重新堆回单文件。
-- 人像逻辑的维护边界现在明确区分：
-  - raw face candidates：允许偏宽松，便于排查误检来源
-  - validated real faces：只有它们能进入真人 portrait policy、多人像评分与真人虚焦判断
-- 任何新的“建议删除 / 不适合保留”规则，都应优先接到 `analysis/discard.py`，再由 UI 与文件操作层消费。
-
-### 并发与 Tk 线程规则
-
-- 目录扫描、分析、修复和 Console 刷新都可能来自后台线程。
-- 维护时必须继续遵守：
-  - Tk 控件更新回主线程
-  - 后台线程不直接写 Treeview、Text、Label、Progressbar
-  - 输出路径生成与文件保存需要考虑并发冲突
-- 当前输出路径生成已加锁；如果未来增加更多并行写入点，不要绕开这层保护。
-- 分析取消依赖“当前分析轮次 + cancel event”双重保护；后台任务在写回结果、进度或完成状态前必须确认轮次仍有效，取消后不得再把旧结果写回 UI。
-
-### 目录扫描维护边界
-
-- 1.1.4 起，目录扫描默认至少忽略 `_repair` 前缀；任何以 `_repair` 开头的目录都必须在根目录与任意子目录层级被整体跳过。
-- 扫描忽略前缀由 [app_settings.py](/E:/aitools/shapeyourphoto/app_settings.py) 持久化，UI 设置入口在主菜单“设置 -> 扫描忽略目录前缀”。
-- 目录扫描模式已分为：
-  - 扫描全部，包含子目录
-  - 只扫描当前目录
-  - 扫描所有子目录
-  - 取消扫描
-- 修改扫描逻辑时，需要同时回归：
-  - 按钮扫描
-  - `分析全部` 触发的补扫
-  - Windows 拖拽文件夹导入
-  - Console / 摘要中的扫描模式、跳过目录数量和导入数量输出
-
-### 统一降噪与 cleanup candidate 修复边界
-
-- 降噪不再是孤立按钮；分析、repair planner、repair engine、完成详情和安全回退必须一起维护。
-- `AnalysisResult.noise_score`、`noise_level`、`denoise_profile`、`denoise_recommended` 是统一降噪链路的正式字段，后续扩展不要再绕开它们。
-- cleanup candidate 默认不进入修复；只有勾选“强制修复不值得保留的图片”后，才允许进入统一修复链，而且仍必须经过评分、安全检查与可保留性判断。
-- 修复完成详情中的 outcome 分类（正常修复、强制尝试修复后保存、强制尝试修复但回退、因仍不适合而跳过）属于正式维护面向用户的解释层，修改时要同步文档与 UI。
-
-### 回归优先级
-
-- 1.1.4 之后的高优先级回归集包括：
-  - 背身人物不得误入真实正面人像虚焦删除
-  - 画作/海报中的脸不得触发真人虚焦建议删除
-  - 高反差窗景、剪影、低调氛围不得被当成普通欠曝强修
-  - 不可恢复天空/白墙高光不得被统一压灰
-  - 自然高饱和场景不得被误判为异常过饱和
-## 1.1.4 Cleanup Note
-
-- 配置相关维护以 [app_settings.py](/E:/aitools/shapeyourphoto/app_settings.py) 和 [settings_dialog.py](/E:/aitools/shapeyourphoto/settings_dialog.py) 为准，不再新增零散菜单项。
-- 扫描相关维护除扫描逻辑本身外，还需同步 [scan_summary_dialog.py](/E:/aitools/shapeyourphoto/scan_summary_dialog.py) 的聚合摘要与跳过明细展示。
-- 修复完成反馈相关维护以 [repair_completion_dialog.py](/E:/aitools/shapeyourphoto/repair_completion_dialog.py) 为准，避免回退到普通 messagebox 或只保留长文本详情。
-## 1.1.4 Similar Images Maintenance Addendum
-
-- 相似检测阈值维护时需要同时覆盖三类样张：近重复/连拍、横竖与裁切变化明显的同主体同场景、完全不同场景。`DSC_2621.JPG` / `DSC_2622.JPG` / `DSC_2623.JPG` 是中等相似回归样张。
-- 相似组列表窗口的 `canvas` 行必须保持可扩展，底部按钮行不得设置 `weight=1`，否则会复现“半个组被截断但底部大片空白”的问题。
-- 相似图片检测是分析后的附加批次流程，维护时不得把相似组结果写回单张 `AnalysisResult.issues`、`scene_type`、人像字段、修复建议或 cleanup candidate。
-- 后台检测完成后，任何 Tk 控件刷新、弹窗展示、列表更新都必须回到主线程。
-- 相似图删除必须继续走 `safe_cleanup_paths()`；不要在相似图窗口中直接 `unlink()` 或永久删除。
-- 同一张图可同时出现在 cleanup candidate 和 similar group 中，UI 只显示标记，不自动删除。
-- 调整阈值时需要同时验证明显重复/连拍可分组，以及不同场景不会被大量误分组。
-# 1.1.5 Real-Image Performance Maintenance Notes
-
-- Use `/test` for local real-photo performance and regression checks. Do not commit user photos; `.gitignore` keeps `/test` image files out of version control while preserving `test/README.md`.
-- Prefer `python benchmark_test_images.py` when checking performance. The benchmark must be allowed to skip when `/test` is empty.
-- Console timing must lead with real `wall_time`. `worker_cumulative_time` is diagnostic only and can exceed wall time under concurrency.
-- Any worker-setting change must go through `resolve_analysis_worker_plan()` so UI, benchmark scripts, and repair pre-analysis agree on requested and actual worker counts.
-- Do not lower working-image size without checking `/test` quality. In this run, 3072 introduced extra high-noise flags; 4096 preserved the existing 6 issue images, 3 cleanup candidates, and 4 similar groups.
-- GPU remains optional detection/fallback. Do not add hard CUDA/CuPy/OpenCV-CUDA/torch dependencies, and do not claim GPU acceleration until `/test` proves real offload benefit.
-# 1.1.5 Analysis Cancel Maintenance Note
-
-- Batch analysis cancel is a state consistency path, not an algorithm path. Do not change analysis thresholds or image metrics when maintaining it.
-- Cancel should immediately preserve `image_paths`, clear this run's `results`, `errors`, `cleanup_flags`, `analysis_phase_progress`, and target-related `similar_groups`, then re-enable controls for a new analysis run.
-- Background workers may finish after cancel, but stale callbacks are rejected by `run_id`; they must not write results, progress, cleanup prompts, similar prompts, or final summaries to UI.
-- Console should log both the cancel request and the later worker shutdown confirmation, including elapsed time and canceled/pending counts.
+- `ui_app.py` 与 `ui_*` mixin：主线程、run_id、取消、列表刷新、Console 合并刷新和弹窗入口。
+- `analysis/core.py` / `analysis/portrait.py`：分析结论与人像误判。
+- `repair_ops.py` / `repair_engine.py`：视觉风格、输出安全和元数据。
+- `file_actions.py`：扫描忽略、清理安全和输出路径。
+- `app_settings.py`：设置兼容、默认值和 worker 规划。
+- `similar_detector.py` / `similar_review_dialog.py`：相似图算法与安全删除。

@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "notes": "Copy this file to test/manifest.json for local expected-result checks. Do not commit real user image filenames in manifest.json.",
+  "images": [
+    {
+      "filename": "portrait_backlit_01.jpg",
+      "scene_type": "backlit portrait",
+      "expected_issues": [],
+      "cleanup_candidate": false,
+      "similar_group": false,
+      "not_expected_issues": ["severe_underexposed", "portrait_out_of_focus"],
+      "notes": "Subject should not be treated as a disposable out-of-focus frontal portrait."
+    },
+    {
+      "filename": "similar_burst_01.jpg",
+      "scene_type": "similar burst",
+      "expected_issues": [],
+      "cleanup_candidate": false,
+      "similar_group": true,
+      "not_expected_issues": [],
+      "notes": "Pair with another similar_burst image to verify similar group detection."
+    },
+    {
+      "filename": "cleanup_blur_01.jpg",
+      "scene_type": "severe blur",
+      "expected_issues": ["global_out_of_focus"],
+      "cleanup_candidate": true,
+      "similar_group": false,
+      "not_expected_issues": [],
+      "notes": "Use only a local non-sensitive image you are comfortable marking as disposable."
+    }
+  ]
+}

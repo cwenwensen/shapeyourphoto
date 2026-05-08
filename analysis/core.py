@@ -15,7 +15,6 @@ from .common import (
     cleanup_binary_mask,
     describe_color_cast,
     edge_density,
-    gradient_maps,
     hue_entropy,
     hue_map,
     issue,

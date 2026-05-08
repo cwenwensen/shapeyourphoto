@@ -2,82 +2,57 @@
 
 ## 项目定位
 
-`ShapeYourPhoto` 是一个本地图片质量分析、修复与清理工具，面向普通用户桌面使用场景，强调：
+ShapeYourPhoto 是一个本地图片质量分析、修复与清理工具，面向 Windows 桌面使用。项目优先保证：
 
-- 双击即可启动
-- 本地离线处理
-- 不改变原有数据格式和基本操作方式
-- 在分析结果基础上给出可解释的修复建议
+- 双击快速启动。
+- 图片本地处理，不上传用户数据。
+- 主列表工作流稳定可理解。
+- 分析、修复、清理和相似图复核都有明确解释。
+- 后续维护能在不破坏用户数据规则的前提下小步演进。
 
-## 核心能力
+## 系统边界
 
-- 单图导入
-- 多图追加到等待列表
-- 文件夹扫描导入
-- Windows 拖拽导入
-- 图片质量分析
-- 自动/手动修复
-- cleanup candidate 强制尝试修复与结果回退
-- 调试模式下的修复前后对比打开
-- 去噪、对比度、色彩、亮度等修复链路
-- 扫描忽略目录前缀与子目录扫描范围选择
-- 元数据保留
-- 历史版本查看
-- 本地统计
+- 当前没有独立单图窗口主路径；单张图片通过主列表导入、分析和修复。
+- 当前没有孤立“去噪当前”主入口；降噪由分析结果、repair planner 和 repair engine 统一决策。
+- cleanup candidate 默认不删除、不修复；删除必须用户复核并走安全清理。
+- 相似图片只作为批次附加结果，不进入单张质量问题、不改变修复建议。
+- GPU 只做可选后端检测和 CPU 回退提示，不改变启动依赖。
 
 ## 主流程
 
-1. 用户通过按钮选择图片、选择目录，或直接拖入文件。
-2. `ui_app.py` 负责把路径加入等待列表，并刷新左侧列表与右侧信息区。
-3. `analyzer.py` 对单张图片进行质量分析，输出 `AnalysisResult`。
-4. `repair_planner.py` 根据检测问题映射到修复方法。
-5. `repair_engine.py` 执行修复链并保存输出，同时处理 EXIF、ICC、DPI、XMP 等信息。
-6. `progress_dialog.py` 统一驱动扫描、分析、修复三类进度显示。
-7. `stats_store.py` 保存累计统计。
+1. `start.bat` 转到 `start_app.bat`，后者查找 Python 并启动 GUI。
+2. `app.py` 创建 Tk 根窗口，挂载 `PhotoAnalyzerApp`。
+3. 用户选择图片、目录或拖入路径，`ui_app.py` 将图片加入主列表。
+4. 目录扫描走 `file_actions.py`，遵守默认扫描模式和忽略前缀，结果写入扫描摘要。
+5. 批量分析由 `ui_app.py` 分配后台 worker，单张分析通过 `analyzer.py` 进入 `analysis/core.py`。
+6. `AnalysisResult` 写回主列表、右侧 HUD、指标、诊断说明、cleanup 面板和 Console。
+7. 批次分析完成后，`similar_detector.py` 可生成批次级 `SimilarImageGroup`。
+8. 修复准备由 `repair_dialog.py` 收集选择，`repair_planner.py` 按单图生成 `RepairPlan`，`repair_engine.py` 执行、评分、回退和保存。
+9. 修复详情由 `repair_completion_dialog.py` 展示；统计由 `stats_store.py` 持久化。
 
-## 当前维护重点
+## 关键数据结构
 
-- 启动应保持快速，不能在日常启动中自动执行依赖安装。
-- 分析与修复逻辑优先做“小步可验证”改动，不要大改架构。
-- 拖拽、扫描、进度、EXIF 朝向、修复输出一致性都属于高敏感链路。
-- 饱和度、偏色、亮部/暗部判断应尽量贴近真实视觉，不要单纯依赖粗暴全局统计。
-## 1.1.4 Maintenance Addendum
+- `Issue`：单个质量问题。
+- `AnalysisResult`：单张图片分析结果，包含问题、指标、人像字段、场景字段、cleanup candidates、`perf_timings` 和 `perf_notes`。
+- `CleanupCandidate`：不适合保留候选原因，供 UI 复核和安全清理使用。
+- `SimilarImageGroup`：批次级相似组，不属于单张分析结果。
+- `RepairPlan`：单图修复方法、强度和策略。
+- `RepairRecord`：修复结果、输出路径、跳过原因、outcome 分类和修复耗时。
 
-### 场景感知分析
+## 高敏感链路
 
-- 1.1.4 的目标从“全局问题检测 + 固定修复”升级为“场景感知分析 + 单图自适应修复 + 可解释批量管理”。
-- 分析结果现在明确区分 `scene_type`、`portrait_type`、`exposure_type`、`highlight_recovery_type`、`color_type`，用于后续单图 repair plan 生成与批量结果解释。
-- 曝光分析不再只根据全局亮度与高光比例下结论，而会优先识别高反差窗景、剪影、低调氛围、建筑白墙/天空、自然高饱和与画作场景。
+- 启动链路：不得把依赖安装放回日常启动。
+- Tk 主线程：后台线程不得直接写 Treeview、Text、Label、Progressbar。
+- 取消分析：后台任务写回前必须校验 run_id 和 cancel_event。
+- EXIF Orientation：读取时像素转正，输出时 Orientation 归一，避免双重旋转。
+- 安全清理：优先回收站，失败才进入 `_cleanup_candidates`，不得永久删除。
+- 设置持久化：`app_settings.json` 缺失自动创建，损坏备份并回退默认值。
+- 性能计时：统一写入 `perf_timings` / `perf_notes`，Console 合并刷新。
 
-### 分析器结构
+## 技术专题
 
-- `analyzer.py` 仍是兼容入口，但真正实现已迁移到 `analysis/` 包。
-- 当前职责分工：
-  - `analysis/core.py`：主分析流程与结果组装
-  - `analysis/portrait.py`：raw face candidate、validated real face、人像/背身/画作区分
-  - `analysis/discard.py`：通用 cleanup candidate 生成
-  - `analysis/common.py`：共享的统计、掩膜、性能与文案工具
-- 拆分的目标是提高长期可维护性与回归定位效率，而不是单纯为了重构目录。
-
-### 批量处理与线程边界
-
-- 目录扫描、批量分析与批量修复都已改为后台线程或线程池执行。
-- Tk 控件更新统一回到主线程，后台线程只提交结果或排队日志，不直接操作控件。
-- 并发策略遵循“分析并发更高、修复并发更保守”的原则，避免大图批量修复时内存与磁盘竞争失控。
-
-### 清理候选机制
-
-- “不适合保留”不再是人像虚焦专属逻辑，而是通用 cleanup candidate 机制。
-- 当前接入的候选来源包括真实正面人像严重虚焦、严重全图糊片与极端不可恢复曝光问题。
-- UI 允许在主菜单重新打开候选列表，并在再次打开时刷新文件存在状态，避免已经移动或删除的文件继续显示为可清理项。
-
-### 扫描与降噪新边界
-
-- 扫描入口已经统一遵守“忽略目录前缀”规则，并默认至少跳过 `_repair*` 目录，避免把程序输出重新扫回主列表。
-- 当目录包含子目录时，扫描模式会明确区分当前目录、全部递归和仅子目录三种有效范围，取消不会启动后台任务。
-- 去噪已并入统一分析与修复链，不再依赖单独按钮；分析阶段先判断是否值得降噪，执行阶段再按人像、夜景暗部、纯净背景和建筑纹理采用不同保护策略。
-## 1.1.4 Cleanup Note
-
-- 当前设置体系以统一“应用设置”面板为准，扫描忽略前缀、默认扫描模式和修复完成详情默认筛选都属于同一配置层。
-- 当前扫描结果解释层除了 Console 简报外，还包含“最近扫描摘要”窗口，用于承载按前缀聚合统计和完整跳过目录明细。
-- 当前修复完成解释层以可筛选详情窗口为准，用户不再通过普通 messagebox 阅读整批长结果。
+- [分析流水线](/E:/aitools/shapeyourphoto/docs/technical/ANALYSIS_PIPELINE.md)
+- [性能与并发](/E:/aitools/shapeyourphoto/docs/technical/PERFORMANCE_AND_CONCURRENCY.md)
+- [相似图片](/E:/aitools/shapeyourphoto/docs/technical/SIMILAR_IMAGES.md)
+- [清理候选](/E:/aitools/shapeyourphoto/docs/technical/CLEANUP_CANDIDATES.md)
+- [设置与扫描](/E:/aitools/shapeyourphoto/docs/technical/SETTINGS_AND_SCAN.md)

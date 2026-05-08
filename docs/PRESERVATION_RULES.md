@@ -1,30 +1,39 @@
 # Preservation Rules
 
-这是 `ShapeYourPhoto` 项目的正式保留规则文档。
+这是 ShapeYourPhoto 的正式文档保留规则。它本身也属于不可删除文档。
 
-强制要求：
+## 强制要求
 
-1. 不得删除 `docs/` 文件夹。
-2. 不得删除 `docs/technical/` 与 `docs/updates/` 两个正式子目录。
-3. 不得删除本目录下的正式维护文档。
-4. 不得用临时 handover、一次性说明、聊天摘录替代正式文档。
-5. 不得在缺少代码核验的情况下，仅依据旧 handover 文档继续开发。
-6. 文档需要随着代码演进更新，但更新方式应为修订、追加、迁移，不是删除文档体系。
+1. 不得删除 `docs/`。
+2. 不得删除 `docs/technical/`。
+3. 不得删除 `docs/updates/`。
+4. 不得清空正式文档。
+5. 不得用临时 handover、聊天摘录或一次性交接文字替代正式文档。
+6. 不得在缺少代码核验的情况下，仅依据旧文档继续开发。
+7. 不得把本地样张、调试输出、patch、`__pycache__` 或临时文件作为文档或版本记录提交。
 
-对后续 agent 的明确提示：
+## 允许的维护方式
 
-- 你可以补充文档。
-- 你可以修正文档中的过时内容。
-- 你可以新增专题文档。
-- 你不能删除 `docs/`。
-- 你不能删除 `docs/technical/`。
-- 你不能删除 `docs/updates/`。
-- 你不能删除这里已有的正式文档，除非先把内容完整迁移到新的正式文档中，并保留清晰指引。
+- 修正文档中的过时或错误内容。
+- 把重复内容迁移到更合适的专题文档。
+- 在旧版本说明前补充“历史说明，以当前文档为准”。
+- 新增技术专题文档。
+- 在更新文档中追加补充记录。
 
-推荐做法：
+## 当前权威顺序
 
-- 如果某份文档过时，在文首标注“已过时”并指向新文档。
-- 如果目录结构需要调整，先迁移再保留跳转说明。
-- 如果新增模块，补充到 [MODULE_REFERENCE.md](/E:/aitools/shapeyourphoto/docs/MODULE_REFERENCE.md)。
+当文档之间出现冲突时，按以下顺序判断：
 
-这份文档本身也属于不可删除文档。
+1. 当前代码。
+2. 1.1.6 的 `docs/` 和 `docs/technical/` 文档。
+3. [docs/updates/1.1.6.md](/E:/aitools/shapeyourphoto/docs/updates/1.1.6.md)。
+4. 较早版本的 `docs/updates/` 历史说明。
+
+旧版本文档应保留历史背景，但不应覆盖当前维护规则。
+
+## 新增文档约定
+
+- 模块职责变化：更新 [MODULE_REFERENCE.md](/E:/aitools/shapeyourphoto/docs/MODULE_REFERENCE.md)。
+- UI 主流程变化：更新 [UI_AND_WORKFLOWS.md](/E:/aitools/shapeyourphoto/docs/UI_AND_WORKFLOWS.md)。
+- 并发、性能、扫描、cleanup、相似图、分析链路变化：优先在 `docs/technical/` 新增或修订专题。
+- 版本升级：更新 [CHANGELOG.md](/E:/aitools/shapeyourphoto/CHANGELOG.md)、[app_metadata.py](/E:/aitools/shapeyourphoto/app_metadata.py) 和 `docs/updates/<version>.md`。

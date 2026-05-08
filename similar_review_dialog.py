@@ -9,6 +9,7 @@ from PIL import Image, ImageOps, ImageTk
 
 from models import AnalysisResult, SimilarImageGroup
 from repair_planner import get_method_labels, suggest_methods_for_result
+from window_layout import MIN_SIZE_NOTICE, bind_minimum_size_notice
 
 
 FILTER_ALL = "全部相似组"
@@ -44,6 +45,7 @@ class SimilarGroupListDialog(tk.Toplevel):
         self._selected_vars: dict[int, tk.BooleanVar] = {}
         self._thumbs: list[ImageTk.PhotoImage] = []
         self._hint_var = tk.StringVar()
+        self._size_notice_var = tk.StringVar(value="")
 
         outer = ttk.Frame(self, padding=14)
         outer.pack(fill="both", expand=True)
@@ -97,9 +99,11 @@ class SimilarGroupListDialog(tk.Toplevel):
         footer.columnconfigure(1, weight=1)
         self.start_button = ttk.Button(footer, text="开始抉择", command=self._start_decision, state="disabled")
         self.start_button.grid(row=0, column=0, sticky="w")
+        ttk.Label(footer, textvariable=self._size_notice_var).grid(row=0, column=1, sticky="w", padx=(12, 0))
         ttk.Button(footer, text="关闭", command=self.destroy).grid(row=0, column=2, sticky="e")
 
         self._render_groups()
+        bind_minimum_size_notice(self, self._size_notice_var, 780, 460)
         self._fit_to_screen(1080, 720)
 
     def _fit_to_screen(self, preferred_width: int, preferred_height: int) -> None:
@@ -442,7 +446,10 @@ class SimilarGroupDecisionDialog(tk.Toplevel):
 
     def _update_size_hint(self) -> None:
         if self.winfo_width() < 980 or self.winfo_height() < 760:
-            self._size_hint_var.set("当前窗口空间偏小，图片区域可滚动；删除按钮和底部操作栏会保留在可达位置。")
+            if self.winfo_width() <= 908 or self.winfo_height() <= 648:
+                self._size_hint_var.set(MIN_SIZE_NOTICE)
+            else:
+                self._size_hint_var.set("当前窗口空间偏小，图片区域可滚动；删除按钮和底部操作栏会保留在可达位置。")
         else:
             self._size_hint_var.set("")
 

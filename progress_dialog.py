@@ -5,7 +5,7 @@ import time
 import tkinter as tk
 from tkinter import ttk
 
-from window_layout import center_window
+from window_layout import bind_minimum_size_notice, center_window
 
 
 @dataclass
@@ -32,14 +32,15 @@ class TaskProgressDialog:
         cancel_text: str = "取消",
     ) -> None:
         self._cancel_callback = cancel_callback
+        self._cancel_requested = False
         self._tick_after_id: str | None = None
         self._started_at = state.started_at or time.monotonic()
         self.window = tk.Toplevel(master)
         self.window.title(state.dialog_title)
         self.window.transient(master.winfo_toplevel())
-        self.window.resizable(False, False)
-        self.window.geometry("560x260")
-        self.window.minsize(520, 240)
+        self.window.resizable(True, False)
+        self.window.geometry("640x320")
+        self.window.minsize(600, 320)
         self.window.configure(bg="#edf4ef")
         self.window.protocol("WM_DELETE_WINDOW", self._handle_close)
 
@@ -48,48 +49,85 @@ class TaskProgressDialog:
         self.detail_var = tk.StringVar(value="准备中...")
         self.count_var = tk.StringVar(value="0 / 0")
         self.elapsed_var = tk.StringVar(value=state.elapsed_text)
+        self.size_notice_var = tk.StringVar(value="")
 
         outer = ttk.Frame(self.window, padding=18, style="Panel.TFrame")
         outer.pack(fill="both", expand=True)
         outer.columnconfigure(0, weight=1)
+        outer.rowconfigure(4, minsize=76)
 
-        ttk.Label(outer, textvariable=self.title_var, style="Header.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(
+        self.header_label = ttk.Label(outer, textvariable=self.title_var, style="Header.TLabel")
+        self.header_label.grid(row=0, column=0, sticky="ew")
+        self.description_label = ttk.Label(
             outer,
             text="当前任务会持续刷新真实进度，完成后自动关闭。",
             style="Sub.TLabel",
-        ).grid(row=1, column=0, sticky="w", pady=(4, 14))
+        )
+        self.description_label.grid(row=1, column=0, sticky="ew", pady=(4, 14))
 
         progress_shell = tk.Frame(outer, bg="#d9e6dd", height=22)
+        progress_shell.grid_propagate(False)
         progress_shell.grid(row=2, column=0, sticky="ew")
         progress_shell.grid_columnconfigure(0, weight=1)
+        progress_shell.grid_rowconfigure(0, weight=1)
         self.progressbar = ttk.Progressbar(progress_shell, mode="determinate", maximum=1, variable=self.progress_var)
-        self.progressbar.grid(row=0, column=0, sticky="ew")
+        self.progressbar.grid(row=0, column=0, sticky="nsew")
 
         stat_row = ttk.Frame(outer, style="Panel.TFrame")
         stat_row.grid(row=3, column=0, sticky="ew", pady=(10, 0))
         stat_row.columnconfigure(0, weight=1)
         ttk.Label(stat_row, textvariable=self.count_var, style="PanelTitle.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(stat_row, textvariable=self.elapsed_var, style="PanelTitle.TLabel").grid(row=0, column=1, sticky="e")
-        ttk.Label(outer, textvariable=self.detail_var, wraplength=500).grid(row=4, column=0, sticky="w", pady=(6, 0))
+        detail_shell = tk.Frame(outer, bg="#fbfcfa", height=76)
+        detail_shell.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        detail_shell.grid_propagate(False)
+        detail_shell.columnconfigure(0, weight=1)
+        detail_shell.rowconfigure(0, weight=1)
+        self.detail_label = tk.Label(
+            detail_shell,
+            textvariable=self.detail_var,
+            bg="#fbfcfa",
+            fg="#1f3527",
+            anchor="nw",
+            justify="left",
+            padx=8,
+            pady=6,
+            wraplength=560,
+        )
+        self.detail_label.grid(row=0, column=0, sticky="nsew")
+        detail_shell.bind("<Configure>", self._sync_detail_wrap)
 
         self.accent_line = tk.Frame(outer, bg=state.accent, height=4)
-        self.accent_line.grid(row=5, column=0, sticky="ew", pady=(14, 0))
+        self.accent_line.grid(row=5, column=0, sticky="ew", pady=(12, 0))
+        self.button_row = ttk.Frame(outer, style="Panel.TFrame", height=38)
+        self.button_row.grid(row=6, column=0, sticky="ew", pady=(10, 0))
+        self.button_row.grid_propagate(False)
+        self.button_row.columnconfigure(0, weight=1)
+        ttk.Label(self.button_row, textvariable=self.size_notice_var, style="Sub.TLabel").grid(row=0, column=0, sticky="w")
+        self.cancel_button: ttk.Button | None = None
         if cancel_callback is not None:
-            ttk.Button(outer, text=cancel_text, command=self._handle_cancel).grid(row=6, column=0, sticky="e", pady=(12, 0))
+            self.cancel_button = ttk.Button(self.button_row, text=cancel_text, command=self._handle_cancel)
+            self.cancel_button.grid(row=0, column=0, sticky="e")
 
         self.window.update_idletasks()
-        center_window(self.window, 560, 260)
+        bind_minimum_size_notice(self.window, self.size_notice_var, 600, 320)
+        center_window(self.window, 640, 320)
         self.update_state(state)
         self._schedule_elapsed_tick()
         self.window.lift()
+
+    def _sync_detail_wrap(self, event) -> None:
+        self.detail_label.configure(wraplength=max(360, event.width - 16))
 
     def _handle_close(self) -> None:
         if self._cancel_callback is not None:
             self._handle_cancel()
 
     def _handle_cancel(self) -> None:
-        if self._cancel_callback is not None:
+        if self._cancel_callback is not None and not self._cancel_requested:
+            self._cancel_requested = True
+            if self.cancel_button is not None:
+                self.cancel_button.configure(state="disabled")
             self._cancel_callback()
 
     def _schedule_elapsed_tick(self) -> None:
@@ -114,7 +152,7 @@ class TaskProgressDialog:
             done_text = f"{state.done:.1f}"
         self.count_var.set(f"{done_text} / {state.total}")
         self.title_var.set(state.dialog_header)
-        self.detail_var.set(state.detail)
+        self.detail_var.set(_compact_progress_text(state.detail))
         self.elapsed_var.set(_format_elapsed(time.monotonic() - self._started_at))
         self.accent_line.configure(bg=state.accent)
         self.window.update_idletasks()
@@ -264,3 +302,10 @@ def _format_elapsed(seconds: float) -> str:
     if hours:
         return f"耗时 {hours:02d}:{minutes:02d}:{sec:02d}"
     return f"耗时 {minutes:02d}:{sec:02d}"
+
+
+def _compact_progress_text(text: str, limit: int = 150) -> str:
+    compact = " ".join(str(text).split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: max(0, limit - 1)].rstrip() + "…"

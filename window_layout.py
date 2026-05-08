@@ -4,6 +4,8 @@ import ctypes
 from ctypes import wintypes
 import tkinter as tk
 
+MIN_SIZE_NOTICE = "已达到最小可用窗口大小"
+
 
 class RECT(ctypes.Structure):
     _fields_ = [
@@ -43,3 +45,28 @@ def center_window(window: tk.Misc, desired_width: int, desired_height: int, min_
     y = top + max(min_margin, (bottom - top - height) // 2)
     window.geometry(f"{width}x{height}+{x}+{y}")
     return width, height
+
+
+def bind_minimum_size_notice(
+    window: tk.Misc,
+    notice_var: tk.StringVar,
+    min_width: int,
+    min_height: int,
+    *,
+    threshold: int = 8,
+) -> None:
+    def _update(event=None) -> None:
+        if event is not None and event.widget is not window:
+            return
+        width = window.winfo_width()
+        height = window.winfo_height()
+        if width <= min_width + threshold or height <= min_height + threshold:
+            notice_var.set(MIN_SIZE_NOTICE)
+        elif notice_var.get() == MIN_SIZE_NOTICE:
+            notice_var.set("")
+
+    window.bind("<Configure>", _update, add="+")
+    try:
+        window.after_idle(_update)
+    except Exception:
+        pass

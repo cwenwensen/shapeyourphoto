@@ -1,129 +1,80 @@
-# 图片质量分析、修复与清理工具
+# ShapeYourPhoto
 
-这是一个面向 Windows 的本地图像分析与修复工具，提供图形界面、一键启动、目录扫描、逐张分析、自动修复、批量修复、勾选清理和累计统计。
+图片质量分析、修复与清理工具。当前版本：`1.1.6`。
+
+ShapeYourPhoto 是一个面向 Windows 桌面使用的本地图像工具，支持图片导入、目录扫描、批量分析、自动/手动修复、不适合保留候选复核、相似图片复核删除、累计统计和本地性能基准。项目默认离线运行，不上传用户图片。
+
+## 当前主路径
+
+1. 通过 `start.bat`、`start_app.bat`、`start_app.vbs` 或 `python app.py` 启动。
+2. 选择图片、选择目录，或把图片/文件夹拖入主窗口。
+3. 图片进入左侧主列表；单张图片也是加入主列表处理，不再存在独立单图窗口。
+4. 点击“分析选中”或“分析全部”，后台线程池执行分析，Tk 控件更新回主线程。
+5. 分析结果刷新右侧 HUD、指标条、诊断说明、属性和 Console。
+6. 批次分析完成后，应用可生成 cleanup candidates 和批次级相似图片组。
+7. 修复通过 `repair_planner.py` 和 `repair_engine.py` 生成单图自适应方案；降噪也在这条统一链路内执行。
+8. 修复完成详情使用可筛选滚动窗口，不再用普通 `messagebox` 承载长结果列表。
 
 ## 当前能力
 
-- 识别 `过曝`
-- 识别 `欠曝`
-- 识别 `失焦/模糊`
-- 识别 `低对比度`
-- 识别 `偏色`
-- 识别 `噪点偏高`
-- 识别 `层次不足`
-- 识别 `色彩寡淡`
-- 识别 `饱和度偏高`
-- 分析阶段显示真实进度，包括目录扫描进度、批量张数进度和单张图片内部阶段进度
-- 左侧列表支持缩略图、滚动条、排序、单击切换处理状态、右键移出列表
-- 支持单张图片导入、目录导入，以及 Windows 原生拖入多张图片或目录
-- 目录扫描支持忽略目录前缀设置，并默认跳过所有 `_repair*` 目录
-- 目录含子目录时可选择扫描全部、只扫当前目录、只扫所有子目录，或取消扫描
-- 右侧采用四区布局：预览图、指标条图、诊断建议、属性与 Console
-- 修复强度按当前图片的检测结果自动计算，不同图片会使用不同修复量
-- cleanup candidate 默认不会进入修复；如需尝试，需在修复弹窗中显式开启“强制修复不值得保留的图片”
-- 去噪已并入统一分析与修复链，会根据人像、夜景、纯净天空和建筑纹理等场景自动决定是否推荐与如何限幅
-- 修复输出支持保留 EXIF、DPI、ICC Profile 和可用 XMP
-- 修复对话框支持使用后缀、关闭后缀、覆盖原文件三种输出方式
-- 累计统计会持久化到本地，重新打开程序后继续累计
+- 识别过曝、欠曝、失焦/模糊、低对比度、偏色、噪点偏高、层次不足、色彩寡淡、饱和度偏高等问题。
+- 人像感知分析区分 raw face candidates、validated real faces、背身/侧背身人物、画作/海报脸和纹理误检。
+- 场景字段包括 `scene_type`、`portrait_type`、`exposure_type`、`highlight_recovery_type`、`color_type`。
+- cleanup candidate 默认不进入修复；只有在修复弹窗显式开启强制尝试后，才允许进入修复链，并仍会经过评分、安全检查和回退。
+- 相似图片检测是分析批次的附加结果，只生成 `SimilarImageGroup`，不写回单张 `AnalysisResult`。
+- 目录扫描支持默认扫描模式、四选项范围选择、忽略目录前缀和“最近扫描摘要”；默认跳过任意层级的 `_repair*` 输出目录。
+- 性能审计通过 `perf_timings` / `perf_notes`、Console 摘要和 `/test` 本地 benchmark 维护。
+- GPU 设置仅做可选后端检测和 CPU 回退提示；CUDA、CuPy、OpenCV-CUDA、torch CUDA 都不是硬依赖。
 
-## 启动方式
+## 启动与依赖
 
-双击：
+日常启动：
 
-- `start.bat`
-- `start_app.bat`
-- `start_app.vbs`
+```powershell
+start.bat
+```
 
-命令行：
+命令行启动：
 
 ```powershell
 python app.py
 ```
 
-如需首次安装依赖，请单独运行：
+首次安装依赖：
 
 ```powershell
 setup_deps.bat
 ```
 
-## 维护文档
-
-- 正式维护文档目录： [docs/README.md](/E:/aitools/shapeyourphoto/docs/README.md)
-- 文档保留规则： [docs/PRESERVATION_RULES.md](/E:/aitools/shapeyourphoto/docs/PRESERVATION_RULES.md)
-- 1.1.4 起，分析主逻辑已迁移到 [analysis/core.py](/E:/aitools/shapeyourphoto/analysis/core.py) 和 [analysis/portrait.py](/E:/aitools/shapeyourphoto/analysis/portrait.py)；[analyzer.py](/E:/aitools/shapeyourphoto/analyzer.py) 仅保留兼容入口。
-
-后续接手时，请优先阅读 `docs/`，并保留该目录及其正式文档。
-
-## 使用说明
-
-1. 选择一个目录，或直接选择单张图片。
-2. 也可以把图片或目录直接拖入主窗口。
-3. 目录扫描时会弹出独立进度框；若目录包含子目录，还会先要求选择扫描范围。
-4. 左侧列表中，新导入图片默认标记为 `已选`。
-5. `分析选中` 会优先分析所有 `已选` 项；如果没有 `已选` 项，则回退为当前高亮项。
-6. 右侧预览区会同步展示分析标签、关键指标、诊断说明、降噪建议和属性信息。
-7. `修复当前` 和 `批量修复勾选` 会根据检测结果自动选择合适的修复算法，并按问题程度计算不同强度。
-8. 如果图片被判定为“不值得保留”，默认不会进入修复；如需尝试，需在修复弹窗中显式开启强制尝试，但仍可能因为评分或安全检查失败而不保存输出。
-9. `累计统计` 可查看累计分析量、修复量、问题检出率，并导出 CSV 报表。
-
-## 元数据与签名说明
-
-- 修复后的 JPG/PNG 会写入 `Software`、`Author`、`ImageDescription` 等修改来源信息。
-- Description / Title 会尽量写入为 `原文件名 + Modified by ...` 形式。
-- DPI 会尽量沿用原图设置，不会主动把 300 DPI 改成 96 DPI。
-- ICC Profile 和可用 XMP 会尝试原样保留。
-- Windows 文件属性里的 `Digital Signatures` 页不是普通 EXIF/XMP 元数据。当前程序会写入可追踪的元数据标记，但不会生成 Windows 代码签名式的真正数字签名页。
-
-## HDR 说明
-
-- 当前流程会尽量保留 ICC、XMP、EXIF 和 DPI。
-- 如果原图属于常规 JPG 中封装的 HDR 或扩展色彩信息，程序会尽量保留可由 Pillow 回传的元数据。
-- 对于依赖专有增益图、厂商扩展容器或系统级 Ultra HDR 结构的内容，是否能完全原样保留取决于底层库能否完整读写该结构。
-
-## 水印说明
-
-- 默认修复流程不会在右下角叠加可见水印。
-- 项目里仍然保留了独立的叠加签名模块，后续如需启用，可以单独接入，不影响当前默认输出。
-
-## 依赖
+依赖：
 
 - `Python 3.10+`
 - `Pillow`
 - `NumPy`
 
-安装：
+## 文档阅读顺序
 
-```powershell
-python -m pip install pillow numpy
-```
+正式维护文档从 [docs/README.md](/E:/aitools/shapeyourphoto/docs/README.md) 开始。建议顺序：
 
-## 主要文件
+1. [docs/PRESERVATION_RULES.md](/E:/aitools/shapeyourphoto/docs/PRESERVATION_RULES.md)
+2. [docs/SYSTEM_OVERVIEW.md](/E:/aitools/shapeyourphoto/docs/SYSTEM_OVERVIEW.md)
+3. [docs/MODULE_REFERENCE.md](/E:/aitools/shapeyourphoto/docs/MODULE_REFERENCE.md)
+4. [docs/UI_AND_WORKFLOWS.md](/E:/aitools/shapeyourphoto/docs/UI_AND_WORKFLOWS.md)
+5. [docs/MAINTENANCE_GUIDE.md](/E:/aitools/shapeyourphoto/docs/MAINTENANCE_GUIDE.md)
+6. [docs/technical/README.md](/E:/aitools/shapeyourphoto/docs/technical/README.md)
+7. [docs/updates/README.md](/E:/aitools/shapeyourphoto/docs/updates/README.md)
 
-- [app.py](/E:/aitools/shapeyourphoto/app.py)
-- [ui_app.py](/E:/aitools/shapeyourphoto/ui_app.py)
-- [analyzer.py](/E:/aitools/shapeyourphoto/analyzer.py)
-- [analysis/core.py](/E:/aitools/shapeyourphoto/analysis/core.py)
-- [analysis/portrait.py](/E:/aitools/shapeyourphoto/analysis/portrait.py)
-- [repair_planner.py](/E:/aitools/shapeyourphoto/repair_planner.py)
-- [repair_engine.py](/E:/aitools/shapeyourphoto/repair_engine.py)
-- [repair_ops.py](/E:/aitools/shapeyourphoto/repair_ops.py)
-- [repair_dialog.py](/E:/aitools/shapeyourphoto/repair_dialog.py)
-- [repair_completion_dialog.py](/E:/aitools/shapeyourphoto/repair_completion_dialog.py)
-- [cleanup_review_dialog.py](/E:/aitools/shapeyourphoto/cleanup_review_dialog.py)
-- [progress_dialog.py](/E:/aitools/shapeyourphoto/progress_dialog.py)
-- [drag_drop.py](/E:/aitools/shapeyourphoto/drag_drop.py)
-- [metadata_utils.py](/E:/aitools/shapeyourphoto/metadata_utils.py)
-- [app_console.py](/E:/aitools/shapeyourphoto/app_console.py)
-- [watermark_signature.py](/E:/aitools/shapeyourphoto/watermark_signature.py)
-- [MODULES.md](/E:/aitools/shapeyourphoto/MODULES.md)
-- [CHANGELOG.md](/E:/aitools/shapeyourphoto/CHANGELOG.md)
+根目录 [MODULES.md](/E:/aitools/shapeyourphoto/MODULES.md) 是快速模块索引；更完整说明以 `docs/` 为准。旧版本更新说明保留历史上下文，如与 1.1.6 当前文档冲突，以 1.1.6 文档和代码为准。
+
+## 本地测试样张
+
+`test/` 用于本地真实图片 benchmark 和回归检查。图片文件被 `.gitignore` 忽略，不应提交；只保留 [test/README.md](/E:/aitools/shapeyourphoto/test/README.md) 作为约定说明。
+
+## 元数据与输出边界
+
+- 修复输出尽量保留 EXIF、DPI、ICC Profile 和可用 XMP。
+- 输出前会归一 EXIF Orientation，避免像素已转正但查看器再次旋转。
+- 程序写入可追踪的图片元数据，不生成 Windows 文件属性里的真正代码签名页。
+- 默认修复流程不叠加可见水印；`watermark_signature.py` 仅作为保留模块。
 
 Copyright (c) 2026 Francis Zhang & Helloalp. All rights reserved. No permission is granted to use, copy, modify, or distribute this project without explicit written permission.
-
-## 1.1.4 当前维护说明
-
-- 当前以主列表工作流为准，独立“单图模式”已移除；保留的是“选择单张图片加入主列表”。
-- 旧的“去噪当前”孤立入口已移除，降噪统一通过分析、修复规划和修复执行链处理。
-- 扫描相关设置现统一收敛到“设置 -> 应用设置”，不再以零散菜单项继续扩张。
-- 扫描完成后如需追踪被跳过的目录，请使用“最近扫描摘要”查看按前缀聚合统计和完整跳过明细。
-- 修复完成详情已改为可筛选的滚动窗口，不再以普通 messagebox 承载长结果列表。

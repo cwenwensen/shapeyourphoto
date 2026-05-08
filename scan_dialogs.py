@@ -5,7 +5,7 @@ from pathlib import Path
 from tkinter import ttk
 
 from app_settings import SCAN_MODE_ALL, SCAN_MODE_CURRENT_ONLY, SCAN_MODE_SUBDIRS_ONLY, normalize_scan_ignore_prefixes
-from window_layout import center_window
+from window_layout import bind_minimum_size_notice, center_window
 
 
 class ScanModeDialog(tk.Toplevel):
@@ -15,7 +15,9 @@ class ScanModeDialog(tk.Toplevel):
         self.transient(parent.winfo_toplevel())
         self.grab_set()
         self.resizable(False, True)
+        self.minsize(620, 320)
         self.result: str | None = None
+        self._size_notice_var = tk.StringVar(value="")
         self._ignored_prefixes = normalize_scan_ignore_prefixes(ignored_prefixes)
 
         outer = ttk.Frame(self, padding=16)
@@ -69,13 +71,15 @@ class ScanModeDialog(tk.Toplevel):
 
         action_row = ttk.Frame(outer)
         action_row.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(12, 0))
-        ttk.Button(action_row, text="取消扫描", command=self._cancel).pack(anchor="e")
+        ttk.Label(action_row, textvariable=self._size_notice_var).pack(side="left")
+        ttk.Button(action_row, text="取消扫描", command=self._cancel).pack(side="right")
 
         self.protocol("WM_DELETE_WINDOW", self._cancel)
         self.update_idletasks()
         width = 640
         max_height = max(260, self.winfo_screenheight() - 120)
         requested_height = min(max_height, max(320, self.winfo_reqheight()))
+        bind_minimum_size_notice(self, self._size_notice_var, 620, 320)
         center_window(self, width, requested_height)
 
     def _choose(self, mode: str) -> None:

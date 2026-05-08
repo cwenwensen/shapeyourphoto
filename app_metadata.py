@@ -1,10 +1,31 @@
 from __future__ import annotations
 
 APP_NAME = "图片质量分析、修复与清理工具"
-APP_VERSION = "1.1.5"
+APP_VERSION = "1.1.6"
 APP_ID = "codex.photo.analyzer.desktop"
 
 CHANGELOG: list[dict[str, object]] = [
+    {
+        "version": "1.1.6",
+        "date": "2026-05-08",
+        "items": [
+            "重整正式文档体系：明确根 README、根 MODULES、docs、docs/technical 与 docs/updates 的分工，并给出后续维护阅读顺序。",
+            "重写系统总览、模块参考、UI 工作流、维护指南和文档保留规则，改为 1.1.6 当前维护口径。",
+            "新增分析流水线、性能与并发、相似图片、cleanup candidates、设置与扫描等技术专题文档。",
+            "修正旧内容误导：独立单图窗口、孤立“去噪当前”入口、普通 messagebox 承载批量长修复详情都不是当前主路径。",
+            "补齐性能计时、benchmark、GPU fallback、相似图、cleanup、取消分析、设置、扫描和修复完成详情的维护规则。",
+            "新增 docs/updates/1.1.6.md，并同步 CHANGELOG 与应用内版本历史。",
+            "清理临时编译缓存，并修正 GPU 状态提示中的过时版本号；本轮不改变分析算法、修复风格、UI 主交互逻辑或用户数据处理规则。",
+            "benchmark_test_images.py 新增本地自动报告：运行后写入被忽略的 benchmark_reports/，包含 JSON/Markdown 报告、慢阶段/慢图片 top 5、核心计数和与上一份报告的简单对比。",
+            "app_settings.py 新增 settings_schema_version 与 migrate_settings() 迁移入口；旧设置、缺字段、错误类型、未知字段和损坏 JSON 都会安全规范化或回退默认值。",
+            "test/README.md 补充本地样张命名与标注方式，新增 test/manifest.example.json；真实 manifest、真实图片和 benchmark 报告继续不提交。",
+            "UI 主类拆分：ui_app.py 保留主窗口装配和高层协调，扫描、分析、修复、主列表、Console/perf、cleanup/similar 复核拆入独立 ui_* mixin 模块；不改变用户行为、分析算法或修复风格。",
+            "修复“批量修复勾选”目标集合语义：真正多选优先，其次使用勾选集合；单个蓝色高亮行只用于“修复当前”，不再把批量目标错误缩成 1 张。",
+            "修复准备窗口在多图时显示批量说明和方法汇总，强调逐张生成独立修复计划；批量修复仍按每张图自己的分析结果、policy、方法、力度、候选评分和 no-op/回退决策执行。",
+            "稳定分析/修复进度弹窗内部布局：固定标题、说明、进度条、计数/耗时、阶段摘要和底部按钮区，长阶段文本压缩显示，避免控件跳动、重叠或重复取消入口观感。",
+            "主要弹窗补齐最小尺寸与统一最小尺寸提示，修复完成详情窗口修正伸缩权重，保证列表/详情滚动且底部按钮可达。",
+        ],
+    },
     {
         "version": "1.1.5",
         "date": "2026-05-07",

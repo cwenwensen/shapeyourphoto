@@ -9,6 +9,7 @@ from typing import Callable
 
 
 SETTINGS_PATH = Path("app_settings.json")
+SETTINGS_SCHEMA_VERSION = 1
 DEFAULT_SCAN_IGNORE_PREFIXES = ["_repair"]
 
 SCAN_MODE_ASK = "ask"
@@ -86,7 +87,9 @@ def repair_summary_filter_label(filter_id: str) -> str:
 def normalize_scan_ignore_prefixes(prefixes: list[str] | tuple[str, ...] | None) -> list[str]:
     ordered: list[str] = []
     seen: set[str] = set()
-    for raw_value in list(prefixes or []):
+    if prefixes is None or not isinstance(prefixes, (list, tuple)):
+        prefixes = []
+    for raw_value in list(prefixes):
         value = str(raw_value).strip()
         if not value:
             continue
@@ -179,8 +182,17 @@ def normalize_gpu_acceleration_mode(mode: str | None) -> str:
     return normalized if normalized in allowed else GPU_ACCELERATION_OFF
 
 
+def normalize_settings_schema_version(value: object) -> int:
+    try:
+        version = int(value)
+    except (TypeError, ValueError):
+        return SETTINGS_SCHEMA_VERSION
+    return version if version > 0 else SETTINGS_SCHEMA_VERSION
+
+
 @dataclass
 class AppSettings:
+    settings_schema_version: int = SETTINGS_SCHEMA_VERSION
     scan_ignore_prefixes: list[str] = field(default_factory=lambda: list(DEFAULT_SCAN_IGNORE_PREFIXES))
     default_scan_mode: str = SCAN_MODE_ASK
     repair_summary_default_filter: str = REPAIR_SUMMARY_FILTER_ALL
@@ -193,10 +205,20 @@ def default_app_settings() -> AppSettings:
     return AppSettings()
 
 
+def migrate_settings(old_version: int, data: dict[str, object]) -> dict[str, object]:
+    migrated = dict(data)
+    if old_version < 1:
+        migrated["settings_schema_version"] = SETTINGS_SCHEMA_VERSION
+    return migrated
+
+
 def validate_settings_payload(payload: object) -> AppSettings:
     if not isinstance(payload, dict):
         payload = {}
+    old_version = normalize_settings_schema_version(payload.get("settings_schema_version", 0))
+    payload = migrate_settings(old_version, payload)
     return AppSettings(
+        settings_schema_version=SETTINGS_SCHEMA_VERSION,
         scan_ignore_prefixes=normalize_scan_ignore_prefixes(payload.get("scan_ignore_prefixes", DEFAULT_SCAN_IGNORE_PREFIXES)),
         default_scan_mode=normalize_default_scan_mode(payload.get("default_scan_mode", SCAN_MODE_ASK)),
         repair_summary_default_filter=normalize_repair_summary_filter(

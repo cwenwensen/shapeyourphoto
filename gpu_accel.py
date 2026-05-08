@@ -71,7 +71,7 @@ def resolve_gpu_status(mode: str) -> GPUBackendStatus:
         backend_name=backend.backend_name,
         available=True,
         active=False,
-        reason=f"检测到 {backend.backend_name}；当前 1.1.5 仍使用 CPU 稳定路径，GPU 数值阶段接入点已预留。",
+        reason=f"检测到 {backend.backend_name}；当前版本仍使用 CPU 稳定路径，GPU 数值阶段接入点已预留。",
     )
 
 

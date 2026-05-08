@@ -5,7 +5,7 @@ from tkinter import messagebox, ttk
 
 from models import RepairMethod, RepairSelection
 from repair_planner import get_method_labels
-from window_layout import center_window
+from window_layout import bind_minimum_size_notice, center_window
 
 
 class RepairDialog(tk.Toplevel):
@@ -16,6 +16,9 @@ class RepairDialog(tk.Toplevel):
         methods: list[RepairMethod],
         recommended_method_ids: list[str],
         allow_adaptive: bool,
+        target_count: int = 1,
+        analyzed_count: int = 0,
+        recommendation_note: str = "",
     ) -> None:
         super().__init__(parent)
         self.title(title)
@@ -28,6 +31,7 @@ class RepairDialog(tk.Toplevel):
         self.use_suffix_var = tk.BooleanVar(value=True)
         self.overwrite_var = tk.BooleanVar(value=False)
         self.force_repair_cleanup_var = tk.BooleanVar(value=False)
+        self._size_notice_var = tk.StringVar(value="")
         self.method_vars = {
             method.method_id: tk.BooleanVar(value=method.method_id in recommended_method_ids)
             for method in methods
@@ -37,7 +41,7 @@ class RepairDialog(tk.Toplevel):
         self.transient(parent.winfo_toplevel())
         self.grab_set()
         self.protocol("WM_DELETE_WINDOW", self._cancel)
-        self.minsize(760, 620)
+        self.minsize(760, 640)
 
         container = ttk.Frame(self, padding=14)
         container.pack(fill="both", expand=True)
@@ -83,7 +87,17 @@ class RepairDialog(tk.Toplevel):
         ttk.Radiobutton(content, text="统一使用勾选的方法", value="manual", variable=self.mode_var).pack(anchor="w", pady=(0, 10))
 
         recommended_labels = "、".join(get_method_labels(recommended_method_ids)) or "当前没有明确推荐项"
-        ttk.Label(content, text=f"当前推荐：{recommended_labels}", wraplength=660, justify="left").pack(anchor="w", pady=(0, 10))
+        if target_count > 1:
+            note = recommendation_note or f"已选择 {target_count} 张：多张图片将按各自分析结果使用不同修复方案和力度。"
+            ttk.Label(content, text=note, wraplength=660, justify="left").pack(anchor="w", pady=(0, 4))
+            ttk.Label(
+                content,
+                text=f"方法汇总（{analyzed_count}/{target_count} 张已有分析）：{recommended_labels}",
+                wraplength=660,
+                justify="left",
+            ).pack(anchor="w", pady=(0, 10))
+        else:
+            ttk.Label(content, text=f"当前推荐：{recommended_labels}", wraplength=660, justify="left").pack(anchor="w", pady=(0, 10))
 
         guard_frame = ttk.LabelFrame(content, text="高风险图片处理", padding=10)
         guard_frame.pack(fill="x", pady=(0, 12))
@@ -137,9 +151,11 @@ class RepairDialog(tk.Toplevel):
 
         action_row = ttk.Frame(container)
         action_row.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        ttk.Label(action_row, textvariable=self._size_notice_var).pack(side="left")
         ttk.Button(action_row, text="取消", command=self._cancel).pack(side="right")
         ttk.Button(action_row, text="开始修复", command=self._confirm).pack(side="right", padx=(0, 8))
 
+        bind_minimum_size_notice(self, self._size_notice_var, 760, 640)
         center_window(self, 820, 820)
 
     def _set_recommended(self) -> None:
@@ -186,7 +202,19 @@ def show_repair_dialog(
     methods: list[RepairMethod],
     recommended_method_ids: list[str],
     allow_adaptive: bool,
+    target_count: int = 1,
+    analyzed_count: int = 0,
+    recommendation_note: str = "",
 ) -> RepairSelection | None:
-    dialog = RepairDialog(parent, title, methods, recommended_method_ids, allow_adaptive)
+    dialog = RepairDialog(
+        parent,
+        title,
+        methods,
+        recommended_method_ids,
+        allow_adaptive,
+        target_count=target_count,
+        analyzed_count=analyzed_count,
+        recommendation_note=recommendation_note,
+    )
     dialog.wait_window()
     return dialog.result

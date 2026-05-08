@@ -7,7 +7,7 @@ from tkinter import ttk
 
 from PIL import Image, ImageOps, ImageTk
 
-from window_layout import center_window
+from window_layout import bind_minimum_size_notice, center_window
 
 
 @dataclass(frozen=True)
@@ -41,6 +41,7 @@ class CleanupReviewDialog(tk.Toplevel):
         self._vars = [tk.BooleanVar(value=False) for _ in entries]
         self._item_lookup: dict[str, int] = {}
         self._thumbs: list[ImageTk.PhotoImage | None] = []
+        self._size_notice_var = tk.StringVar(value="")
 
         outer = ttk.Frame(self, padding=14)
         outer.pack(fill="both", expand=True)
@@ -111,8 +112,10 @@ class CleanupReviewDialog(tk.Toplevel):
             state="disabled",
         )
         self.delete_button.pack(side="left")
+        ttk.Label(button_row, textvariable=self._size_notice_var).pack(side="left", padx=(12, 0))
         ttk.Button(button_row, text="跳过", command=self._skip).pack(side="right")
 
+        bind_minimum_size_notice(self, self._size_notice_var, 860, 520)
         center_window(self, 980, 620)
 
     def _build_thumbnail(self, path: Path, size: tuple[int, int] = (90, 68)) -> ImageTk.PhotoImage | None:
