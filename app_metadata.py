@@ -1,10 +1,20 @@
 from __future__ import annotations
 
 APP_NAME = "图片质量分析、修复与清理工具"
-APP_VERSION = "1.1.7"
+APP_VERSION = "1.1.8"
 APP_ID = "codex.photo.analyzer.desktop"
 
 CHANGELOG: list[dict[str, object]] = [
+    {
+        "version": "1.1.8",
+        "date": "2026-05-10",
+        "items": [
+            "重构平台检测：集中定义 paths.IS_WIN / IS_MAC / IS_LINUX 常量，替换各模块中散落的 sys.platform 字符串比较，避免 import-time 崩溃。",
+            "drag_drop.py 的 Windows 原生拖拽模块现在通过 from paths import IS_WIN 守卫，确保非 Windows 平台不会触发 ctypes 导入错误。",
+            "dnd_support.py 的 tkinterdnd2 数据解析改为使用 Tcl splitlist，比手写花括号解析更稳定。",
+            "paths.user_data_dir() 和 watermark_signature.py 的字体路径解析加入 functools.cache，减少重复 I/O。",
+        ],
+    },
     {
         "version": "1.1.7",
         "date": "2026-05-10",
