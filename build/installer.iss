@@ -38,8 +38,10 @@ VersionInfoCompany={#AppPublisher}
 VersionInfoProductName={#AppName}
 
 [Languages]
+; Inno Setup 自带的语言包仅有 Default.isl (English)。
+; ChineseSimplified.isl 需手动下载放入 Languages/ 才有；CI 上 chocolatey 装的版本没有，
+; 这里仅声明 English 避免 CI 编译失败。安装向导语言不影响 app 内中文 UI。
 Name: "english"; MessagesFile: "compiler:Default.isl"
-Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
