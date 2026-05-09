@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-import sys
 import tkinter as tk
+
+from paths import IS_WIN
 
 MIN_SIZE_NOTICE = "已达到最小可用窗口大小"
 
 
 def _get_work_area() -> tuple[int, int, int, int] | None:
-    if sys.platform != "win32":
+    if not IS_WIN:
         return None
     try:
         import ctypes

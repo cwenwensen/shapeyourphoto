@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import functools
 import shutil
 import sys
 from pathlib import Path
@@ -14,6 +15,10 @@ from pathlib import Path
 
 _APP_NAME = "ShapeYourPhoto"
 _APP_AUTHOR = "Helloalp"
+
+IS_WIN = sys.platform == "win32"
+IS_MAC = sys.platform == "darwin"
+IS_LINUX = sys.platform.startswith("linux")
 
 
 def resource_path(relative: str | Path) -> Path:
@@ -24,8 +29,9 @@ def resource_path(relative: str | Path) -> Path:
     return Path(__file__).resolve().parent / relative
 
 
+@functools.cache
 def user_data_dir() -> Path:
-    """跨平台用户数据目录，目录会被自动创建。
+    """跨平台用户数据目录，目录会被自动创建（结果缓存，mkdir 仅首次执行）。
 
     macOS: ~/Library/Application Support/ShapeYourPhoto/
     Windows: %APPDATA%/Helloalp/ShapeYourPhoto/
@@ -36,10 +42,9 @@ def user_data_dir() -> Path:
 
         path = Path(user_data_path(_APP_NAME, _APP_AUTHOR))
     except ImportError:
-        # platformdirs 未安装时（开发态首次运行）走简单回退
-        if sys.platform == "darwin":
+        if IS_MAC:
             path = Path.home() / "Library" / "Application Support" / _APP_NAME
-        elif sys.platform == "win32":
+        elif IS_WIN:
             import os
 
             base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")

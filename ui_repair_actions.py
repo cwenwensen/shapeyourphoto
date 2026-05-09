@@ -530,7 +530,8 @@ class UiRepairActionsMixin:
 
         def worker() -> None:
             import subprocess
-            import sys as _sys
+
+            from paths import IS_MAC
 
             errors: list[str] = []
             startfile = getattr(os, "startfile", None)
@@ -538,7 +539,7 @@ class UiRepairActionsMixin:
                 try:
                     if startfile is not None:
                         startfile(str(path))
-                    elif _sys.platform == "darwin":
+                    elif IS_MAC:
                         subprocess.run(["open", str(path)], check=False)
                     else:
                         subprocess.run(["xdg-open", str(path)], check=False)

@@ -1,33 +1,21 @@
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 from PIL import Image, ImageDraw
 
 from app_metadata import APP_ID
-from paths import is_frozen, resource_path, user_data_dir
-
-
-def _icon_paths() -> tuple[Path, Path]:
-    """返回 PNG/ICO 图标路径。
-
-    打包态：直接读取 _MEIPASS/assets/ 内随包发的图标。
-    开发态：若 assets/ 缺失则懒生成到源码 assets/。
-    """
-    png_path = resource_path("assets/app_icon.png")
-    ico_path = resource_path("assets/app_icon.ico")
-    return png_path, ico_path
+from paths import IS_WIN, is_frozen, resource_path, user_data_dir
 
 
 def ensure_app_icon() -> tuple[Path, Path]:
-    png_path, ico_path = _icon_paths()
+    png_path = resource_path("assets/app_icon.png")
+    ico_path = resource_path("assets/app_icon.ico")
     if png_path.exists() and ico_path.exists():
         return png_path, ico_path
 
-    # 打包态下 _MEIPASS 是只读，不应再生成；如果走到这里，说明打包遗漏了 assets。
+    # 打包态下 _MEIPASS 是只读；走到这里说明 spec datas 漏了 assets，退到 user_data_dir 兜底
     if is_frozen():
-        # 退到 user_data_dir 里生成一个，避免崩溃；打包遗漏需修 spec 的 datas。
         target_dir = user_data_dir() / "assets"
         target_dir.mkdir(parents=True, exist_ok=True)
         png_path = target_dir / "app_icon.png"
@@ -57,7 +45,7 @@ def ensure_app_icon() -> tuple[Path, Path]:
 
 def _configure_windows_taskbar(root, ico_path: Path) -> None:
     """设置 Windows 任务栏 AppUserModelID 与 hwnd 图标。"""
-    if sys.platform != "win32":
+    if not IS_WIN:
         return
     import ctypes
 
@@ -81,7 +69,7 @@ def configure_window_icon(root) -> None:
     _configure_windows_taskbar(root, ico_path)
 
     # iconbitmap 仅 Windows 接受 .ico；macOS/Linux 走 iconphoto。
-    if sys.platform == "win32":
+    if IS_WIN:
         try:
             root.iconbitmap(default=str(ico_path))
         except Exception:

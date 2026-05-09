@@ -6,11 +6,12 @@
 
 from __future__ import annotations
 
-import sys
 import tkinter as tk
 
+from paths import IS_WIN
 
-if sys.platform == "win32":
+
+if IS_WIN:
     import ctypes
     from ctypes import wintypes
     from pathlib import Path

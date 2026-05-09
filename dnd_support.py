@@ -15,43 +15,32 @@ import tkinter as tk
 from pathlib import Path
 from typing import Callable, Iterable
 
+from paths import IS_WIN
+
 
 def create_root() -> tk.Tk:
     """按平台创建根窗口。"""
-    if sys.platform != "win32":
+    if not IS_WIN:
         try:
             from tkinterdnd2 import TkinterDnD
 
             return TkinterDnD.Tk()
-        except Exception:
-            # tkinterdnd2 不可用时退回普通 Tk，拖拽功能在该平台禁用，但应用仍可启动
-            pass
+        except Exception as exc:
+            # 让用户能在 stderr 里看到原因，避免拖拽失效却找不到线索
+            print(f"[dnd_support] tkinterdnd2 unavailable, drag-drop disabled: {exc}", file=sys.stderr)
     return tk.Tk()
 
 
-def _parse_tkdnd_data(data: str) -> list[Path]:
-    """tkinterdnd2 的 event.data 是 Tcl 列表字符串，含空格的路径用 {} 包围。"""
-    paths: list[Path] = []
-    buf: list[str] = []
-    in_brace = False
-    for ch in data:
-        if ch == "{" and not buf:
-            in_brace = True
-            continue
-        if ch == "}" and in_brace:
-            paths.append(Path("".join(buf)))
-            buf = []
-            in_brace = False
-            continue
-        if ch == " " and not in_brace:
-            if buf:
-                paths.append(Path("".join(buf)))
-                buf = []
-            continue
-        buf.append(ch)
-    if buf:
-        paths.append(Path("".join(buf)))
-    return paths
+def _parse_tkdnd_data(widget: tk.Misc, data: str) -> list[Path]:
+    """tkinterdnd2 的 event.data 是 Tcl 列表字符串，含空格的路径用 {} 包围。
+
+    用 widget 自身 Tcl 解释器的 splitlist，比手写解析稳。
+    """
+    try:
+        parts = widget.tk.splitlist(data)
+    except tk.TclError:
+        return []
+    return [Path(p) for p in parts]
 
 
 class _NoopDropTarget:
@@ -75,13 +64,13 @@ class _Tkdnd2DropTarget:
     def install(self) -> None:
         try:
             from tkinterdnd2 import DND_FILES
-        except Exception:
+        except ImportError:
             return
         try:
             self.window.drop_target_register(DND_FILES)  # type: ignore[attr-defined]
             self.window.dnd_bind("<<Drop>>", self._on_drop)  # type: ignore[attr-defined]
             self._installed = True
-        except Exception:
+        except (AttributeError, tk.TclError):
             self._installed = False
 
     def uninstall(self) -> None:
@@ -89,22 +78,19 @@ class _Tkdnd2DropTarget:
             return
         try:
             self.window.drop_target_unregister()  # type: ignore[attr-defined]
-        except Exception:
+        except (AttributeError, tk.TclError):
             pass
         self._installed = False
 
     def _on_drop(self, event) -> None:
-        try:
-            paths = _parse_tkdnd_data(str(event.data))
-        except Exception:
-            paths = []
+        paths = _parse_tkdnd_data(self.window, str(event.data))
         if paths:
             self.window.after(0, lambda p=paths: self.callback(p))
 
 
 def install_drop_target(root: tk.Misc, callback: Callable[[Iterable[Path]], None]):
     """根据平台返回已就绪的拖拽接收器（已调用 install）。"""
-    if sys.platform == "win32":
+    if IS_WIN:
         from drag_drop import WindowsFileDropTarget
 
         target = WindowsFileDropTarget(root, callback)
