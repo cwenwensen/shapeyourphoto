@@ -1,22 +1,47 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
+
+from paths import resource_path
 
 
 SOFTWARE_NAME = "ShapeYourPhoto"
 AUTHOR_NAME = "Helloalp"
 
 
+def _font_candidates() -> list[Path]:
+    """按优先级返回字体候选：先用打包内字体，再退系统中文字体。"""
+    bundled = [
+        resource_path("assets/fonts/SourceHanSansCN-Regular.otf"),
+        resource_path("assets/fonts/NotoSansCJKsc-Regular.otf"),
+    ]
+    if sys.platform == "win32":
+        system = [
+            Path(r"C:\Windows\Fonts\msyh.ttc"),
+            Path(r"C:\Windows\Fonts\msyhbd.ttc"),
+            Path(r"C:\Windows\Fonts\arial.ttf"),
+        ]
+    elif sys.platform == "darwin":
+        system = [
+            Path("/System/Library/Fonts/PingFang.ttc"),
+            Path("/System/Library/Fonts/Hiragino Sans GB.ttc"),
+            Path("/Library/Fonts/Arial Unicode.ttf"),
+        ]
+    else:
+        system = [
+            Path("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"),
+            Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+        ]
+    return bundled + system
+
+
 def _load_overlay_font(image: Image.Image) -> ImageFont.ImageFont:
     font_size = max(14, int(min(image.size) * 0.018))
-    candidates = [
-        Path(r"C:\Windows\Fonts\msyh.ttc"),
-        Path(r"C:\Windows\Fonts\msyhbd.ttc"),
-        Path(r"C:\Windows\Fonts\arial.ttf"),
-    ]
-    for font_path in candidates:
+    for font_path in _font_candidates():
         if font_path.exists():
             try:
                 return ImageFont.truetype(str(font_path), font_size)
